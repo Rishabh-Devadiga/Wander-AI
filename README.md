@@ -421,6 +421,18 @@ cp .env.example .env
 
 > **Security Note**: Never commit API keys or database credentials to version control.
 
+### Vercel Frontend Deployment
+
+The React frontend intentionally keeps its API client pointed at the same-origin path `/api` (`src/services/api.ts`). Do not add `VITE_API_URL` or expose backend secrets to the browser.
+
+For Vercel production deployments, `vercel.json` rewrites frontend API calls to the deployed Render backend:
+
+```text
+/api/* -> https://wander-ai-sx2d.onrender.com/api/*
+```
+
+No frontend Vercel environment variables are required for API routing.
+
 ---
 
 ## 12. Local Development & Setup Manual
