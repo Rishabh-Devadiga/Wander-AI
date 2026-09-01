@@ -1,0 +1,22 @@
+# TourFlow AI - Production & Development Python Dependencies
+
+# Core Web Framework & Server
+fastapi>=0.110.0,<1.0.0
+uvicorn[standard]>=0.28.0,<1.0.0
+
+# Database ORM & Migrations
+sqlalchemy>=2.0.25,<3.0.0
+alembic>=1.13.1,<2.0.0
+psycopg2-binary>=2.9.9
+
+# Data Validation & Settings Management
+pydantic>=2.6.0,<3.0.0
+pydantic-settings>=2.2.0,<3.0.0
+python-dotenv>=1.0.1
+
+# AI & LLM Integration (Google GenAI SDK)
+google-genai>=0.1.1
+
+# Testing & HTTP Client
+pytest>=8.0.0
+httpx>=0.27.0

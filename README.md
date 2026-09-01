@@ -1,17 +1,17 @@
-# TourFlow AI - Technical Handoff & Architecture Guide
+# TourFlow AI - Technical Handoff & Local Development Manual
 
 > **Enterprise AI-Powered Personalized & Dynamic Travel Planning Platform**  
-> Complete Technical Documentation & Onboarding Manual for AI Engineers and Developers.
+> Complete Technical Documentation, Architecture Guide, and Local Setup Manual.
 
 ---
 
 ## 1. Project Overview
 
 ### What TourFlow AI Does
-TourFlow AI is a dual-sided travel orchestration and execution platform that bridges the gap between individual travelers and commercial tour operators. It combines generative AI with strict algorithmic validation to deliver hyper-tailored multi-day travel itineraries, verified real-world transport routes, live dynamic destination visuals, and automated disruption replanning.
+TourFlow AI is a dual-sided travel orchestration platform bridging individual travelers with commercial tour operators. It combines generative AI models (Google Gemini) with strict algorithmic validation to deliver hyper-tailored multi-day travel itineraries, verified real-world transport routes, live dynamic destination visuals, and automated disruption replanning.
 
 ### Problem It Solves
-1. **Hallucinated Travel Logistics**: Generic LLMs hallucinate non-existent flight routes, impossible transit durations, phantom train numbers, and incorrect season-destination pairings. TourFlow AI enforces strict ground-truth validation over transport hubs, geocoordinates, and real Indian transport routes.
+1. **Hallucinated Travel Logistics**: Generic LLMs often hallucinate non-existent flight routes, impossible transit durations, phantom train numbers, and invalid season-destination pairings. TourFlow AI enforces strict ground-truth validation over transport hubs, geocoordinates, and real Indian transit routes.
 2. **Fragile Static Itineraries**: Conventional itineraries are static PDFs that break when landslides, weather delays, or road closures occur. TourFlow AI provides real-time impact analysis, autonomous AI candidate generation, and single-click operator replanning.
 3. **Disjointed Traveler-Operator State**: Traditional travel businesses rely on fragmented spreadsheets, WhatsApp chats, and disconnected booking tools. TourFlow AI uses a unified canonical data model where Traveler and Operator interfaces operate on the exact same database records in real time.
 
@@ -66,7 +66,7 @@ TourFlow AI is a dual-sided travel orchestration and execution platform that bri
 
 ---
 
-## 3. Architecture
+## 3. System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -150,7 +150,8 @@ TourFlow AI is a dual-sided travel orchestration and execution platform that bri
 │   └── main.py                     # FastAPI application entrypoint & lifecycle
 ├── database/                       # Database migrations and seed fixtures
 │   ├── migrations/                 # Alembic migration scripts
-│   │   └── versions/               # Versioned migration files (0001_initial_schema)
+│   │   ├── env.py                  # Alembic environment runner
+│   │   └── versions/               # Versioned migration files (0001_initial_schema.py)
 │   └── seed_data/                  # Seed scripts
 │       └── seed.py                 # Deterministic seed data for destinations/hotels
 ├── docs/                           # Technical Specifications
@@ -210,6 +211,7 @@ TourFlow AI is a dual-sided travel orchestration and execution platform that bri
 ├── index.html                      # HTML5 entrypoint & Google Fonts
 ├── metadata.json                   # AI Studio applet metadata & permissions
 ├── package.json                    # Node dependencies & execution scripts
+├── requirements.txt                # Python backend dependencies
 ├── server.ts                       # Unified Express server & Vite middleware
 ├── tourflow.db                     # SQLite database file (auto-created if used)
 ├── tsconfig.json                   # TypeScript configuration
@@ -386,13 +388,21 @@ The Operator Suite (`/operator/*`) provides commercial management tools:
 
 ## 11. Environment Variables
 
-Define all environment variables in `.env` (refer to `.env.example`):
+Create `.env` in the root directory by copying `.env.example`:
 
-| Variable | Required | Default | Purpose |
+```bash
+# Windows (PowerShell / CMD)
+copy .env.example .env
+
+# macOS / Linux
+cp .env.example .env
+```
+
+| Variable | Required | Default / Example | Purpose |
 |:---|:---:|:---|:---|
-| `GEMINI_API_KEY` | **Yes** | *None* | Google Gemini API key (kept server-side only). |
+| `GEMINI_API_KEY` | **Yes** | *None (obtain from Google AI Studio)* | Google Gemini API key (kept server-side only). |
 | `GEMINI_MODEL` | No | `gemini-2.5-flash` | Primary Gemini model for generation and chat. |
-| `GEMINI_FALLBACK_MODELS` | No | `gemini-2.5-flash,gemini-3.7-flash,gemini-flash-latest,gemini-3.1-flash-lite` | Comma-delimited list of fallback models. |
+| `GEMINI_FALLBACK_MODELS` | No | `gemini-2.5-flash,gemini-3.7-flash,gemini-flash-latest,gemini-3.1-flash-lite` | Cascading list of fallback models for resilience. |
 | `GEMINI_TEMPERATURE` | No | `1.0` | Default sampling temperature. |
 | `GEMINI_CONVERSATIONAL_TEMPERATURE` | No | `1.0` | Sampling temperature for conversational chat. |
 | `GEMINI_STRUCTURED_TEMPERATURE` | No | `1.0` | Sampling temperature for JSON structured outputs. |
@@ -403,7 +413,7 @@ Define all environment variables in `.env` (refer to `.env.example`):
 | `GEMINI_INITIAL_BACKOFF_MS`| No | `1000` | Initial exponential backoff delay in milliseconds. |
 | `GEMINI_MAX_BACKOFF_MS` | No | `10000` | Maximum backoff delay cap in milliseconds. |
 | `GEMINI_TIMEOUT_MS` | No | `30000` | API request timeout in milliseconds. |
-| `DATABASE_URL` | No | `sqlite:///./tourflow.db` | PostgreSQL connection string (or SQLite path). |
+| `DATABASE_URL` | No | `sqlite:///./tourflow.db` | PostgreSQL or SQLite connection string. |
 | `APP_URL` | No | `http://localhost:3000` | Base URL for client application. |
 | `BACKEND_PORT` | No | `3000` (or `8000`) | Network port for the backend server. |
 | `ENVIRONMENT` | No | `development` | Deployment environment (`development` / `production`). |
@@ -413,53 +423,116 @@ Define all environment variables in `.env` (refer to `.env.example`):
 
 ---
 
-## 12. Local Setup & Execution
+## 12. Local Development & Setup Manual
+
+Follow these step-by-step instructions to run TourFlow AI locally on any operating system (Windows, macOS, Linux).
 
 ### Prerequisites
-- **Node.js**: v18.0.0 or higher
-- **Python**: v3.10 or higher
-- **Package Managers**: `npm` (v9+) or `bun`, `pip`
+1. **Node.js**: v18.0.0+ or v20.0.0+ (check with `node -v`)
+2. **Python**: v3.10+ (check with `python --version` or `python3 --version`)
+3. **PostgreSQL** *(Optional)*: PostgreSQL 14+ if using a local PostgreSQL database, OR use the zero-config SQLite default (`tourflow.db`).
 
-### Step 1: Clone & Install Dependencies
+---
+
+### Step-by-Step Setup
+
+#### Step 1: Open Terminal in Project Root
 ```bash
-# Install Node.js frontend & server dependencies
+# Navigate to the repository root directory
+cd tourflow-ai
+```
+
+#### Step 2: Set Up Python Virtual Environment
+```bash
+# On Windows (PowerShell / Command Prompt):
+python -m venv venv
+venv\Scripts\activate
+
+# On macOS / Linux:
+python3 -m venv venv
+source venv/bin/activate
+```
+
+#### Step 3: Install Python Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+#### Step 4: Install Node.js Frontend Dependencies
+```bash
 npm install
-
-# (Optional) Install Python backend dependencies if running standalone FastAPI
-pip install -r requirements.txt || pip install fastapi uvicorn sqlalchemy alembic pydantic pydantic-settings google-genai pytest
 ```
 
-### Step 2: Configure Environment
+#### Step 5: Configure Environment Variables
 ```bash
+# Create your local .env file from .env.example:
+# On Windows:
+copy .env.example .env
+
+# On macOS / Linux:
 cp .env.example .env
-# Edit .env and supply your GEMINI_API_KEY
+```
+Open `.env` in your text editor and add your **`GEMINI_API_KEY`** (get a free key at [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)).
+
+*(Optional)* If using a PostgreSQL database, update `DATABASE_URL`:
+```env
+DATABASE_URL=postgresql://postgres:your_password@localhost:5432/tourflow
 ```
 
-### Step 3: Run Database Migrations & Seed Data
+#### Step 6: Run Database Migrations
+Run Alembic migrations to construct all database tables:
 ```bash
-# Run Alembic migrations against the database
-alembic upgrade head
-
-# Populate database with verified destination catalog (Manali, Goa, Kerala, Rajasthan, Kashmir)
-python3 -m database.seed_data.seed
+# Ensure venv is activated
+python -m alembic upgrade head
 ```
 
-### Step 4: Start Development Servers
+#### Step 7: Seed Database with Initial Catalog & Demo Trips
+Populate destinations (Manali, Goa, Kerala, Rajasthan, Kashmir), verified hotels, activities, transport options, and demo trips:
 ```bash
-# Start Full-Stack Application (Express + Vite on http://localhost:3000)
+python -m database.seed_data.seed
+```
+
+---
+
+### Starting the Application
+
+You have two execution modes:
+
+#### Option A: Full-Stack Integrated Mode (Recommended)
+This runs the full-stack Express server with integrated Vite middleware and all API endpoints on a single port:
+```bash
 npm run dev
-
-# (Optional) Start Python FastAPI backend standalone on http://localhost:8000
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+- Open in browser: **[http://localhost:3000](http://localhost:3000)**
 
-### Access Points & Demo Credentials
-- **Traveler Application**: [http://localhost:3000/](http://localhost:3000/)
-- **Operator Portal**: [http://localhost:3000/operator/login](http://localhost:3000/operator/login)
-- **Operator Demo Credentials**:
-  - Email: `operator@tourflow.ai`
-  - Password: `demo123`
-- **FastAPI Interactive Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+#### Option B: Standalone Dual-Server Mode
+Run the Python FastAPI backend and Vite frontend separately:
+
+1. **Terminal 1 - Start Python FastAPI Backend**:
+```bash
+# Windows / macOS / Linux (with venv activated)
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+- Interactive Swagger API Docs: **[http://localhost:8000/docs](http://localhost:8000/docs)**
+- Health Check: **[http://localhost:8000/api/health](http://localhost:8000/api/health)**
+
+2. **Terminal 2 - Start Frontend**:
+```bash
+npm run dev
+```
+- Traveler Experience: **[http://localhost:3000](http://localhost:3000)**
+- Operator Suite: **[http://localhost:3000/operator/dashboard](http://localhost:3000/operator/dashboard)**
+
+---
+
+### Demo Credentials & Access Points
+
+| Portal | URL Path | Demo Email | Demo Password / Note |
+|:---|:---|:---|:---|
+| **Traveler Workspace** | `http://localhost:3000/` | `alex.morgan@tourflow.ai` | Direct Access (No password required) |
+| **Operator Enterprise Suite** | `http://localhost:3000/operator/login` | `operator@tourflow.ai` | `demo123` |
+| **FastAPI Interactive Docs** | `http://localhost:8000/docs` | *N/A* | OpenAPI / Swagger UI |
+| **API Health Status** | `http://localhost:3000/api/health` | *N/A* | JSON System Diagnostic |
 
 ---
 
@@ -467,13 +540,13 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 ### Automated Test Suites
 ```bash
-# 1. Run Python Backend Pytest Suite
+# 1. Run Python Backend Test Suite (FastAPI + SQLAlchemy + Seed verification)
 pytest tests/ -v
 
 # 2. Run TypeScript Static Analysis & Type Checking
 npm run lint
 
-# 3. Test Production Bundling
+# 3. Test Production Bundling (Vite + esbuild CJS server bundle)
 npm run build
 ```
 
