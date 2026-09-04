@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Building2, Phone, Mail, MapPin, Star, ShieldCheck, ToggleLeft, ToggleRight, Search, Filter } from 'lucide-react';
-import { OperatorVendor } from '../../server/operatorEngine';
+import type { OperatorVendor } from '../../server/operatorEngine';
 
 interface OperatorVendorsProps {
   vendors: OperatorVendor[];

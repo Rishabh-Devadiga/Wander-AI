@@ -104,11 +104,7 @@ How can I assist your dispatch & operations team today?`,
           <h1 className="text-2xl font-bold text-white tracking-tight flex items-center space-x-2">
             <span>AI Operations Assistant</span>
             <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-<<<<<<< HEAD
               GEMINI 3.7 FLASH OPS
-=======
-              GEMINI 2.5 FLASH PRO OPS
->>>>>>> 51230599472f7acad5e2b2cc983f64ca1a59cd08
             </span>
           </h1>
           <p className="text-sm text-slate-400 mt-0.5">

@@ -237,6 +237,11 @@ class TripBase(BaseModel):
 class TripCreate(TripBase):
     user_id: Optional[str] = None
     preferences: Optional[TripPreferenceBase] = None
+    destination_name: Optional[str] = None
+    destination: Optional[Any] = None
+    origin: Optional[str] = None
+    travel_type: Optional[str] = None
+    formatted_dates: Optional[str] = None
 
 class TripUpdate(BaseModel):
     title: Optional[str] = None
@@ -271,6 +276,8 @@ class AIChatRequest(BaseModel):
     session_context: Optional[Dict[str, Any]] = None
     destination_id: Optional[str] = None
     trip_id: Optional[str] = None
+    current_trip: Optional[Dict[str, Any]] = None
+    history: Optional[List[Dict[str, Any]]] = None
 
 class AIChatResponse(BaseModel):
     response: str
@@ -295,4 +302,3 @@ class AIGenerateItineraryRequest(BaseModel):
 class AIReplanRequest(BaseModel):
     trip_id: str
     trigger_event: Dict[str, Any]
-

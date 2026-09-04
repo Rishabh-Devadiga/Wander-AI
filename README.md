@@ -580,3 +580,97 @@ npm run build
 5. **Preserve Dual-Portal Parity**: Ensure any new feature added to the Traveler experience is observable and manageable from the Operator Enterprise Suite.
 6. **No API Key Exposure**: Always keep `GEMINI_API_KEY` and secret credentials in server-side processes. Never prefix backend secrets with `VITE_`.
 7. **Verify Builds**: Run `npm run lint` and `npm run build` after making structural changes to maintain clean, production-ready deployments.
+
+---
+
+## AI Development Context / Change Log
+
+### 2026-09-04
+
+Inspected:
+
+- `Agents.md`
+- `README.md`
+- `backend/api/routes.py`
+- Repository file list via `rg --files`
+- FastAPI route decorators in `backend/api/routes.py`
+- Current git worktree status
+
+Changed:
+
+- Populated `Agents.md` with project development rules, persistent context documentation rules, verification rules, architecture rules, security rules, and scope rules.
+- Added `BACKEND_MIGRATION_DOCUMENTATION.md` at the repository root as the standalone backend migration documentation file.
+- Resolved FastAPI/backend compatibility work in `backend/api/routes.py`.
+- Updated request schemas in `backend/schemas/schemas.py`.
+- Resolved frontend API/client conflict state in `src/services/api.ts`.
+- Resolved operator assistant component conflict state in `src/components/operator/OperatorAiAssistant.tsx`.
+- Changed the server-only import in `src/components/operator/OperatorVendors.tsx` to a type-only import.
+
+Files modified:
+
+- `Agents.md`
+- `BACKEND_MIGRATION_DOCUMENTATION.md`
+- `README.md`
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `src/components/operator/OperatorAiAssistant.tsx`
+- `src/components/operator/OperatorVendors.tsx`
+- `src/services/api.ts`
+
+APIs/routes added or made FastAPI-compatible:
+
+- `GET /api/sync/version`
+- `GET /api/trips`
+- `DELETE /api/trips/{trip_id}`
+- `POST /api/trips/{trip_id}/trigger-disruption`
+- `POST /api/trips/{trip_id}/impact-analysis`
+- `POST /api/trips/{trip_id}/ai-replan-options`
+- `POST /api/trips/{trip_id}/apply-replan`
+- `POST /api/trips/{trip_id}/accept-request`
+- `POST /api/trips/{trip_id}/decline-request`
+- `GET /api/operator/dashboard`
+- `GET /api/operator/vendors`
+- `POST /api/operator/vendors/{vendor_id}/toggle`
+- `GET /api/operator/bookings`
+- `POST /api/operator/bookings/{booking_id}/action`
+- `GET /api/operator/alerts`
+- `POST /api/operator/alerts/{alert_id}/resolve`
+- `GET /api/operator/analytics`
+- `POST /api/auth/operator-login`
+- `POST /api/trips/{trip_id}/change-transport`
+- `POST /api/trips/{trip_id}/change-accommodation`
+- `POST /api/trips/{trip_id}/change-daily-accommodation`
+- `POST /api/trips/{trip_id}/change-day-accommodation`
+- `POST /api/trips/{trip_id}/add-activity`
+- `POST /api/trips/{trip_id}/delete-activity`
+- `POST /api/trips/{trip_id}/swap-activity`
+- `POST /api/trips/{trip_id}/edit-activity`
+- `POST /api/trips/{trip_id}/toggle-activity`
+- `POST /api/trips/{trip_id}/add-day-leg`
+- `POST /api/trips/{trip_id}/remove-day-leg`
+- `GET /api/possible-options`
+- `POST /api/trips/{trip_id}/lock-booking`
+
+Architecture changes:
+
+- FastAPI is documented as the intended production backend for `/api/*` traffic.
+- The old Node/Express backend remains in the repository and was not deleted.
+- `vercel.json` continues to rewrite `/api/*` traffic to the deployed Render FastAPI backend.
+
+Tests/checks performed:
+
+- `Get-Content -LiteralPath .\Agents.md`
+- `Get-Content -LiteralPath .\README.md`
+- `rg -n "AI Development Context|Change Log|Development Context" README.md`
+- `rg -n "@router\.(get|post|put|delete|patch)" backend/api/routes.py`
+- `rg --files`
+- `git status --short`
+- `git diff --check`
+- Merge conflict marker scan on edited files
+
+Known remaining issues:
+
+- Local Python validation could not run because the `python` command resolves to the Windows Store alias and no Python interpreter is available in PATH.
+- FastAPI local startup and Python tests could not run for the same reason.
+- Frontend lint/build could not complete because local Node dependencies are not installed and `tsc`/`vite` are unavailable.
+- `OPERATOR_LOGIN_PASSWORD` must be configured in the backend environment for `POST /api/auth/operator-login`.
