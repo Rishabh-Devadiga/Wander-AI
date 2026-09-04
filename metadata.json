@@ -1,0 +1,8 @@
+{
+  "name": " Remix Remix WANDERAI - Dynamic Travel Planning",
+  "description": "AI-powered travel planning with live dynamic destination backdrops, conversational itinerary synthesis, and real-time smart replanning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
