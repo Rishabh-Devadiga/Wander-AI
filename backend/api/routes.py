@@ -1,5 +1,8 @@
 from typing import List, Optional
+<<<<<<< HEAD
 from datetime import datetime
+=======
+>>>>>>> 51230599472f7acad5e2b2cc983f64ca1a59cd08
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from backend.database.connection import get_db
@@ -51,6 +54,7 @@ def health_check(db: Session = Depends(get_db)):
     }
 
 # ----------------------------------------------------
+<<<<<<< HEAD
 # Frontend sync metadata
 # ----------------------------------------------------
 @router.get("/sync/version")
@@ -66,6 +70,8 @@ def sync_version(db: Session = Depends(get_db)):
     }
 
 # ----------------------------------------------------
+=======
+>>>>>>> 51230599472f7acad5e2b2cc983f64ca1a59cd08
 # Destinations API
 # ----------------------------------------------------
 @router.get("/destinations", response_model=List[DestinationRead])
@@ -306,6 +312,7 @@ def update_trip_preferences(
 # ----------------------------------------------------
 # AI Planning & Gemini Intelligence APIs
 # ----------------------------------------------------
+<<<<<<< HEAD
 @router.post("/operator/ai-assistant")
 def operator_ai_assistant(payload: AIChatRequest):
     """
@@ -338,6 +345,8 @@ def operator_ai_assistant(payload: AIChatRequest):
     }
 
 
+=======
+>>>>>>> 51230599472f7acad5e2b2cc983f64ca1a59cd08
 @router.post("/ai/chat", response_model=AIChatResponse)
 def ai_chat(payload: AIChatRequest):
     """Conversational AI endpoint for travel consultation."""

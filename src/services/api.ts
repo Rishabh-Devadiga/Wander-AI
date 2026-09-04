@@ -377,7 +377,11 @@ export const TourFlowApi = {
     const res = await fetch(`${API_BASE}/operator/ai-assistant`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+<<<<<<< HEAD
       body: JSON.stringify({ message, trip_id: contextTripId }),
+=======
+      body: JSON.stringify({ message, context_trip_id: contextTripId }),
+>>>>>>> 51230599472f7acad5e2b2cc983f64ca1a59cd08
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'AI Operations Assistant error' }));

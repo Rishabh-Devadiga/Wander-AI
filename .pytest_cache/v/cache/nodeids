@@ -1,0 +1,10 @@
+[
+  "tests/test_backend.py::test_ai_foundation_endpoints",
+  "tests/test_backend.py::test_get_activities_for_manali",
+  "tests/test_backend.py::test_get_destination_manali",
+  "tests/test_backend.py::test_get_destinations",
+  "tests/test_backend.py::test_get_hotels",
+  "tests/test_backend.py::test_get_transport",
+  "tests/test_backend.py::test_health_endpoint",
+  "tests/test_backend.py::test_trip_creation_and_retrieval"
+]
