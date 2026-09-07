@@ -61,7 +61,7 @@ export default function DestinationExplorer({
     creator: `@wanderer_${d.slug || 'explorer'}`,
     duration: `${Math.max(3, (idx % 4) + 3)} Days`,
     budget: `₹${((idx + 1) * 6500 + 15000).toLocaleString()}`,
-    vibe: d.popular_activities?.[0] || 'Scenic / Adventure',
+    vibe: d.tags[0] || 'Scenic / Adventure',
     likes: `${(45 + (idx * 23.4) % 180).toFixed(1)}k`,
     tags: [`#${d.name.replace(/\s+/g, '')}`, `#${d.state_region.replace(/\s+/g, '')}`, '#WanderFlow'],
     imageUrl: d.hero_image_url || 'https://images.unsplash.com/photo-1595815771614-ade9d652a65d?auto=format&fit=crop&w=800&q=80',

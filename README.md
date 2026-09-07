@@ -735,6 +735,62 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-08 Frontend Type Contract Corrections
+
+Inspected:
+
+- Frontend TourFlow types, API client, affected trip and operator components, FastAPI response construction, Pydantic schemas, and SQLAlchemy models.
+
+Changed:
+
+- Updated the PDF export to use the canonical `Trip.selected_transport` and `Trip.selected_accommodation` fields.
+- Replaced unreachable planning/generating state logic and non-canonical itinerary item types with the existing canonical values.
+- Aligned destination reel metadata with the backend `DestinationRead.tags` field and itinerary disruption handling with the persisted `skipped` status.
+- Added an API-facing `OperatorVendor` type matching `GET /api/operator/vendors`, typed the API client and operator portal state, and made nullable vendor location and contact values safe to search and display.
+- No backend behavior was changed.
+
+Files modified:
+
+- `src/components/AIChatConsole.tsx`
+- `src/components/DestinationExplorer.tsx`
+- `src/components/operator/OperatorItineraries.tsx`
+- `src/components/operator/OperatorPortal.tsx`
+- `src/components/operator/OperatorTripWorkspace.tsx`
+- `src/components/operator/OperatorVendors.tsx`
+- `src/services/api.ts`
+- `src/types/tourflow.ts`
+- `README.md`
+
+Tests/checks performed:
+
+- `npx.cmd tsc --noEmit --pretty false`: passed with no diagnostics.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `.\\venv\\Scripts\\python.exe -m pytest -q`: passed (50 passed, 51 warnings).
+
+### 2026-09-08 React JSX Type Resolution
+
+Inspected:
+
+- `package.json`, `package-lock.json`, `tsconfig.json`, `vite.config.ts`, installed React and TypeScript packages, and `src/components/IndiaLandingExperience.tsx`.
+
+Changed:
+
+- Scoped `tsconfig.json` to the Vite frontend sources and Vite configuration, excluding generated build output and the Python virtual environment.
+- Explicitly included the Vite, Node, React, and React DOM declaration packages so the TypeScript language service consistently resolves the JSX runtime and intrinsic element definitions.
+- No React component, styling, frontend API, or backend source was changed.
+
+Files modified:
+
+- `tsconfig.json`
+- `README.md`
+
+Tests/checks performed:
+
+- `npx.cmd tsc --noEmit --pretty false`: no TS7026 or `IndiaLandingExperience.tsx` diagnostics. It exits nonzero for 26 existing, non-JSX model-shape errors in other components.
+- `npm.cmd run build`: passed. Vite emitted its existing large-chunk warning.
+- `python -m pytest -q`: the system Python environment does not have `pytest` installed.
+- `.\\venv\\Scripts\\python.exe -m pytest -q`: passed (50 passed, 51 warnings).
+
 ### 2026-09-07 Replanning Engine Strengthening
 
 Inspected:

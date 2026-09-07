@@ -53,7 +53,7 @@ export const OperatorTripWorkspace: React.FC<OperatorTripWorkspaceProps> = ({
 
   // Check if trip has active unresolved disruption
   const activeCriticalAlert = trip.alerts?.find((a) => !a.is_resolved && (a.severity === 'critical' || a.severity === 'warning'));
-  const hasGroundedItem = trip.itinerary?.some((i) => i.status === 'cancelled' || i.title?.toLowerCase().includes('paragliding') && trip.alerts?.some(a => !a.is_resolved));
+  const hasGroundedItem = trip.itinerary?.some((i) => i.status === 'skipped' || i.title?.toLowerCase().includes('paragliding') && trip.alerts?.some(a => !a.is_resolved));
 
   // Run impact analysis when disruption is detected
   const handleRunImpactAnalysis = async () => {
@@ -445,7 +445,7 @@ export const OperatorTripWorkspace: React.FC<OperatorTripWorkspaceProps> = ({
 
                     <div className="space-y-2">
                       {dayItems.map((item) => {
-                        const isGrounded = item.status === 'cancelled' || (item.title?.toLowerCase().includes('paragliding') && trip.alerts?.some(a => !a.is_resolved));
+                        const isGrounded = item.status === 'skipped' || (item.title?.toLowerCase().includes('paragliding') && trip.alerts?.some(a => !a.is_resolved));
 
                         return (
                           <div

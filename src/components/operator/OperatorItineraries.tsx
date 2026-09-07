@@ -174,7 +174,7 @@ export const OperatorItineraries: React.FC<OperatorItinerariesProps> = ({
                     <div
                       key={item.id || idx}
                       className={`bg-slate-950 border rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
-                        item.status === 'cancelled'
+                        item.status === 'skipped'
                           ? 'border-rose-900/50 bg-rose-950/10 opacity-70'
                           : 'border-slate-800 hover:border-slate-700'
                       }`}

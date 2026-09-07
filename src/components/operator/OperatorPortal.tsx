@@ -14,7 +14,7 @@ import { OperatorAlerts } from './OperatorAlerts';
 import { OperatorAiAssistant } from './OperatorAiAssistant';
 import { OperatorAnalytics } from './OperatorAnalytics';
 import { TourFlowApi } from '../../services/api';
-import { Trip } from '../../types/tourflow';
+import type { OperatorVendor, Trip } from '../../types/tourflow';
 
 interface OperatorPortalProps {
   onSwitchToTraveler: () => void;
@@ -50,7 +50,7 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
 
   const [dashboardData, setDashboardData] = useState<any | null>(null);
   const [allTrips, setAllTrips] = useState<Trip[]>([]);
-  const [vendors, setVendors] = useState<any[]>([]);
+  const [vendors, setVendors] = useState<OperatorVendor[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [analyticsData, setAnalyticsData] = useState<any | null>(null);

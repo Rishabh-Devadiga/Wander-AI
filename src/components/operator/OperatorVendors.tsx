@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Building2, Phone, Mail, MapPin, Star, ShieldCheck, ToggleLeft, ToggleRight, Search, Filter } from 'lucide-react';
-import type { OperatorVendor } from '../../server/operatorEngine';
+import type { OperatorVendor } from '../../types/tourflow';
 
 interface OperatorVendorsProps {
   vendors: OperatorVendor[];
@@ -12,9 +12,10 @@ export const OperatorVendors: React.FC<OperatorVendorsProps> = ({ vendors, onTog
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
 
   const filtered = vendors.filter((v) => {
-    const matchesSearch = v.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.location.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      v.contact_person.toLowerCase().includes(searchQuery.toLowerCase());
+    const normalizedQuery = searchQuery.toLowerCase();
+    const matchesSearch = v.name.toLowerCase().includes(normalizedQuery) ||
+      (v.location ?? '').toLowerCase().includes(normalizedQuery) ||
+      (v.contact_person ?? '').toLowerCase().includes(normalizedQuery);
     const matchesCat = selectedCategory === 'all' || v.category === selectedCategory;
     return matchesSearch && matchesCat;
   });
@@ -108,11 +109,11 @@ export const OperatorVendors: React.FC<OperatorVendorsProps> = ({ vendors, onTog
                 <div className="text-xs text-slate-400 space-y-1">
                   <div className="flex items-center space-x-1.5">
                     <MapPin className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-                    <span>{vendor.location}</span>
+                    <span>{vendor.location ?? 'Location unavailable'}</span>
                   </div>
                   <div className="flex items-center space-x-1.5">
                     <Phone className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-                    <span>{vendor.phone} ({vendor.contact_person})</span>
+                    <span>{vendor.phone ?? 'Phone unavailable'} ({vendor.contact_person ?? 'Contact unavailable'})</span>
                   </div>
                 </div>
               </div>

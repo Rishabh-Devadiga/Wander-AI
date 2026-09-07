@@ -87,6 +87,18 @@ export interface TransportOption {
   is_active: boolean;
 }
 
+export interface OperatorVendor {
+  id: string;
+  name: string;
+  category: 'hotel' | 'activity' | 'transport' | 'guide';
+  location: string | null;
+  phone: string | null;
+  contact_person: string | null;
+  rating: number;
+  is_available: boolean;
+  active_bookings_count: number;
+}
+
 export interface TripPreference {
   id: string;
   trip_id: string;

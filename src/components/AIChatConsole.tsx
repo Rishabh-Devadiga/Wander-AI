@@ -1014,22 +1014,22 @@ You can select any option or lock it in via AI Guide or direct self-booking!`,
       targetBudget: generatedTrip.total_budget,
       totalCost: generatedTrip.total_cost,
       currency: 'INR',
-      transport: generatedTrip.transport ? {
-        operator: generatedTrip.transport.operator,
-        mode: generatedTrip.transport.mode,
-        route_summary: generatedTrip.transport.route_summary,
-        departure_time: generatedTrip.transport.departure_time,
-        arrival_time: generatedTrip.transport.arrival_time,
-        total_price: generatedTrip.transport.total_price,
+      transport: generatedTrip.selected_transport ? {
+        operator: generatedTrip.selected_transport.operator,
+        mode: generatedTrip.selected_transport.mode,
+        route_summary: generatedTrip.selected_transport.route_summary,
+        departure_time: generatedTrip.selected_transport.departure_time,
+        arrival_time: generatedTrip.selected_transport.arrival_time,
+        total_price: generatedTrip.selected_transport.total_price,
       } : undefined,
-      accommodation: generatedTrip.accommodation ? {
-        name: generatedTrip.accommodation.name,
-        category: generatedTrip.accommodation.category,
-        location: generatedTrip.accommodation.location,
-        room_type: generatedTrip.accommodation.room_type,
-        total_price: generatedTrip.accommodation.total_price,
-        price_per_night: generatedTrip.accommodation.price_per_night,
-        nights: generatedTrip.accommodation.nights,
+      accommodation: generatedTrip.selected_accommodation ? {
+        name: generatedTrip.selected_accommodation.name,
+        category: generatedTrip.selected_accommodation.category,
+        location: generatedTrip.selected_accommodation.location,
+        room_type: generatedTrip.selected_accommodation.room_type,
+        total_price: generatedTrip.selected_accommodation.total_price,
+        price_per_night: generatedTrip.selected_accommodation.price_per_night,
+        nights: generatedTrip.selected_accommodation.nights,
       } : undefined,
       costBreakdown: generatedTrip.cost_breakdown,
       itinerary: (generatedTrip.itinerary || []).map((item) => ({
@@ -1586,7 +1586,7 @@ You can select any option or lock it in via AI Guide or direct self-booking!`,
                   }
                 }}
                 onGenerateTrip={handleGenerateTripNow}
-                isGenerating={workspaceState === 'generating'}
+                isGenerating={false}
               />
             )}
 
@@ -3313,10 +3313,6 @@ You can select any option or lock it in via AI Guide or direct self-booking!`,
         const itemType = item.item_type;
         const itemTitleLower = (item.title || '').toLowerCase();
         const isTransport = itemType === 'transport' || 
-          itemType === 'flight' || 
-          itemType === 'cab' || 
-          itemType === 'train' || 
-          itemType === 'bus' || 
           itemTitleLower.includes('flight') || 
           itemTitleLower.includes('train') || 
           itemTitleLower.includes('departure from') || 

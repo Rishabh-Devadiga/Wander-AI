@@ -7,6 +7,7 @@ import {
   Trip,
   TripPreference,
   AIChatResponse,
+  OperatorVendor,
   PossibleOptionItem,
 } from '../types/tourflow';
 
@@ -283,7 +284,7 @@ export const TourFlowApi = {
     return await res.json();
   },
 
-  async getOperatorVendors(): Promise<any[]> {
+  async getOperatorVendors(): Promise<OperatorVendor[]> {
     const res = await fetch(`${API_BASE}/operator/vendors`);
     if (!res.ok) {
       return [];
