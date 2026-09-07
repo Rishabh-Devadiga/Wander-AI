@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Any, Dict, Literal
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 # User & Profile Schemas
 class TravelerProfileBase(BaseModel):
@@ -302,3 +302,413 @@ class AIGenerateItineraryRequest(BaseModel):
 class AIReplanRequest(BaseModel):
     trip_id: str
     trigger_event: Dict[str, Any]
+
+
+# Destination research agent schemas.  These deliberately describe research
+# context rather than a Trip/TripState, because research is read-only input to
+# later planning workflows.
+class ResearchContext(BaseModel):
+    destination: str = Field(min_length=1, max_length=255)
+    origin: Optional[str] = Field(default=None, max_length=255)
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    duration_days: Optional[int] = Field(default=None, ge=1, le=62)
+    traveler_count: Optional[int] = Field(default=None, ge=1, le=100)
+    total_budget: Optional[float] = Field(default=None, ge=0)
+    currency: Optional[str] = Field(default="INR", min_length=3, max_length=10)
+    pace: Optional[str] = Field(default=None, max_length=50)
+    travel_style: Optional[str] = Field(default=None, max_length=100)
+    preferences: Optional[TripPreferenceBase] = None
+
+
+class ResearchPlace(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    category: str = Field(min_length=1, max_length=100)
+    area_location: Optional[str] = Field(default=None, max_length=255)
+    description: str = Field(min_length=1, max_length=1000)
+    relevance_to_traveler: Optional[str] = Field(default=None, max_length=500)
+    practical_notes: Optional[str] = Field(default=None, max_length=500)
+
+
+class ResearchResult(BaseModel):
+    destination: str = Field(min_length=1, max_length=255)
+    destination_summary: str = Field(min_length=1, max_length=2000)
+    recommended_areas: List[ResearchPlace] = Field(default_factory=list, max_length=8)
+    key_places: List[ResearchPlace] = Field(default_factory=list, max_length=12)
+    attractions: List[ResearchPlace] = Field(default_factory=list, max_length=12)
+    travel_considerations: List[str] = Field(default_factory=list, max_length=12)
+    seasonal_considerations: List[str] = Field(default_factory=list, max_length=12)
+    preference_relevant_insights: List[str] = Field(default_factory=list, max_length=12)
+    source: str = Field(description="catalog_fallback, gemini, or crewai")
+
+
+# Accommodation selection is read-only. Hotel facts in the response are always
+# rebuilt from the catalog after any AI ranking has been validated.
+class AccommodationContext(BaseModel):
+    destination: str = Field(min_length=1, max_length=255)
+    check_in: Optional[datetime] = None
+    check_out: Optional[datetime] = None
+    duration_days: Optional[int] = Field(default=None, ge=1, le=62)
+    traveler_count: Optional[int] = Field(default=None, ge=1, le=100)
+    total_budget: Optional[float] = Field(default=None, ge=0)
+    currency: Optional[str] = Field(default="INR", min_length=3, max_length=10)
+    travel_style: Optional[str] = Field(default=None, max_length=100)
+    max_price_per_night: Optional[float] = Field(default=None, ge=0)
+    required_amenities: List[str] = Field(default_factory=list, max_length=12)
+    preferences: Optional[TripPreferenceBase] = None
+
+
+class AccommodationSelection(BaseModel):
+    hotel_id: str = Field(min_length=1, max_length=255)
+    recommendation_reason: str = Field(min_length=1, max_length=800)
+    matched_preferences: List[str] = Field(default_factory=list, max_length=12)
+
+
+class AccommodationCrewOutput(BaseModel):
+    selections: List[AccommodationSelection] = Field(min_length=1, max_length=5)
+
+
+class AccommodationOption(BaseModel):
+    hotel_id: str
+    name: str
+    category: str
+    price_per_night: float
+    currency: str
+    rating: float
+    address: Optional[str] = None
+    amenities: List[str] = Field(default_factory=list)
+    description: Optional[str] = None
+    recommendation_reason: str
+    matched_preferences: List[str] = Field(default_factory=list)
+
+
+class AccommodationResult(BaseModel):
+    destination: str
+    recommended_options: List[AccommodationOption] = Field(default_factory=list, max_length=5)
+    source: str = Field(description="catalog_fallback or crewai")
+    catalog_validated: bool = True
+
+
+class TransportationContext(BaseModel):
+    destination: str = Field(min_length=1, max_length=255)
+    origin: str = Field(min_length=1, max_length=255)
+    traveler_count: int = Field(default=1, ge=1, le=100)
+    currency: str = Field(default="INR", min_length=3, max_length=10)
+    transport_type: Optional[str] = Field(default=None, max_length=50)
+    max_price: Optional[float] = Field(default=None, ge=0)
+    max_duration_hours: Optional[float] = Field(default=None, gt=0, le=168)
+    travel_style: Optional[str] = Field(default=None, max_length=100)
+    preferences: Optional[TripPreferenceBase] = None
+
+
+class TransportationSelection(BaseModel):
+    transport_id: str = Field(min_length=1, max_length=255)
+    recommendation_reason: str = Field(min_length=1, max_length=800)
+    matched_preferences: List[str] = Field(default_factory=list, max_length=12)
+
+
+class TransportationCrewOutput(BaseModel):
+    selections: List[TransportationSelection] = Field(min_length=1, max_length=5)
+
+
+class TransportationOption(BaseModel):
+    transport_id: str
+    type: str
+    name: str
+    route_from: str
+    route_to: str
+    duration_hours: float
+    price: float
+    currency: str
+    capacity: int
+    features: List[str] = Field(default_factory=list)
+    recommendation_reason: str
+    matched_preferences: List[str] = Field(default_factory=list)
+
+
+class TransportationResult(BaseModel):
+    origin: str
+    destination: str
+    recommended_options: List[TransportationOption] = Field(default_factory=list, max_length=5)
+    source: str = Field(description="catalog_fallback or crewai")
+    catalog_validated: bool = True
+
+
+class ExperienceContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    destination: str = Field(min_length=1, max_length=255)
+    traveler_count: int = Field(default=1, ge=1, le=100)
+    currency: str = Field(default="INR", min_length=3, max_length=10)
+    category: Optional[str] = Field(default=None, max_length=50)
+    difficulty_level: Optional[str] = Field(default=None, max_length=50)
+    max_price_per_person: Optional[float] = Field(default=None, ge=0)
+    max_duration_hours: Optional[float] = Field(default=None, gt=0, le=168)
+    travel_style: Optional[str] = Field(default=None, max_length=100)
+    preferences: Optional[TripPreferenceBase] = None
+
+
+class ExperienceSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    activity_id: str = Field(min_length=1, max_length=255)
+    recommendation_reason: str = Field(min_length=1, max_length=800)
+    matched_preferences: List[str] = Field(default_factory=list, max_length=12)
+
+
+class ExperienceCrewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    selections: List[ExperienceSelection] = Field(min_length=1, max_length=5)
+
+
+class ExperienceOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    activity_id: str
+    title: str
+    category: str
+    duration_hours: float
+    price_per_person: float
+    currency: str
+    difficulty_level: str
+    rating: float
+    description: Optional[str] = None
+    meeting_point: Optional[str] = None
+    recommendation_reason: str
+    matched_preferences: List[str] = Field(default_factory=list)
+
+
+class ExperienceResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    destination: str
+    recommended_options: List[ExperienceOption] = Field(default_factory=list, max_length=5)
+    source: str = Field(description="catalog_fallback or crewai")
+    catalog_validated: bool = True
+
+
+class ItineraryContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    destination: str = Field(min_length=1, max_length=255)
+    origin: Optional[str] = Field(default=None, max_length=255)
+    traveler_count: int = Field(default=1, ge=1, le=100)
+    currency: str = Field(default="INR", min_length=3, max_length=10)
+    duration_days: int = Field(ge=2, le=6)
+    total_budget: float = Field(gt=0)
+    travel_style: Optional[str] = Field(default=None, max_length=100)
+    pace: Optional[str] = Field(default=None, max_length=50)
+    preferences: Optional[TripPreferenceBase] = None
+
+
+class ItineraryCrewDay(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    day_number: int = Field(ge=1, le=6)
+    activity_ids: List[str] = Field(default_factory=list, max_length=2)
+
+
+class ItineraryCrewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hotel_id: str = Field(min_length=1, max_length=255)
+    transport_id: str = Field(min_length=1, max_length=255)
+    days: List[ItineraryCrewDay] = Field(min_length=2, max_length=6)
+
+
+class ItineraryCatalogHotel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hotel_id: str
+    name: str
+    category: str
+    price_per_night: float
+    currency: str
+    rating: float
+    address: Optional[str] = None
+    amenities: List[str] = Field(default_factory=list)
+    description: Optional[str] = None
+
+
+class ItineraryCatalogTransport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    transport_id: str
+    type: str
+    name: str
+    route_from: str
+    route_to: str
+    duration_hours: float
+    price: float
+    currency: str
+    capacity: int
+    features: List[str] = Field(default_factory=list)
+
+
+class ItineraryItemRecommendation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_type: Literal["transport", "activity"]
+    hotel_id: Optional[str] = None
+    transport_id: Optional[str] = None
+    activity_id: Optional[str] = None
+    title: str
+    start_time: str
+    end_time: str
+    cost: float
+    currency: str
+    description: Optional[str] = None
+    location: Optional[str] = None
+
+
+class ItineraryDay(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    day_number: int
+    items: List[ItineraryItemRecommendation] = Field(default_factory=list)
+
+
+class ItineraryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    destination: str
+    duration_days: int
+    accommodation: ItineraryCatalogHotel
+    transportation: ItineraryCatalogTransport
+    itinerary_days: List[ItineraryDay] = Field(min_length=2, max_length=6)
+    total_catalog_cost: float
+    currency: str
+    source: str = Field(description="catalog_fallback or crewai")
+    catalog_validated: bool = True
+
+
+class TripManagementContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trip_id: str = Field(min_length=1, max_length=255)
+
+
+class TripManagementCrewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hotel_id: str = Field(min_length=1, max_length=255)
+    transport_id: str = Field(min_length=1, max_length=255)
+    activity_ids: List[str] = Field(min_length=1, max_length=5)
+    management_notes: List[str] = Field(default_factory=list, max_length=8)
+
+
+class TripManagementActivity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    activity_id: str
+    title: str
+    category: str
+    duration_hours: float
+    price_per_person: float
+    currency: str
+    difficulty_level: str
+    rating: float
+    description: Optional[str] = None
+    meeting_point: Optional[str] = None
+
+
+class TripManagementItineraryReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    itinerary_item_id: str
+    day_number: int
+    order_index: int
+    item_type: str
+    hotel_id: Optional[str] = None
+    transport_id: Optional[str] = None
+    activity_id: Optional[str] = None
+    status: str
+
+
+class TripManagementResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trip_id: str
+    destination: str
+    accommodation: ItineraryCatalogHotel
+    transportation: ItineraryCatalogTransport
+    activities: List[TripManagementActivity] = Field(min_length=1, max_length=5)
+    itinerary_references: List[TripManagementItineraryReference] = Field(default_factory=list)
+    total_catalog_cost: float
+    currency: str
+    booking_readiness: str
+    existing_booking_count: int
+    management_notes: List[str] = Field(default_factory=list)
+    source: str = Field(description="catalog_fallback or crewai")
+    catalog_validated: bool = True
+
+
+# Booking recommendations are read-only. The canonical Booking model and the
+# explicit lock-booking route remain responsible for creating reservations.
+class BookingRecommendationContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trip_id: str = Field(min_length=1, max_length=255)
+
+
+class BookingCrewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    booking_keys: List[str] = Field(min_length=1, max_length=20)
+    booking_notes: List[str] = Field(default_factory=list, max_length=8)
+
+
+class BookingRecommendationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    booking_key: str
+    item_type: str
+    catalog_id: str
+    name: str
+    description: Optional[str] = None
+    quantity: int = Field(ge=1)
+    unit_catalog_cost: float
+    total_catalog_cost: float
+    currency: str
+    existing_booking_reference: Optional[str] = None
+    existing_booking_status: Optional[str] = None
+    existing_payment_status: Optional[str] = None
+
+
+class BookingRecommendationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trip_id: str
+    destination: str
+    booking_items: List[BookingRecommendationItem] = Field(default_factory=list)
+    total_catalog_cost: float
+    currency: str
+    booking_status: str
+    booking_readiness: str
+    existing_booking_count: int
+    missing_requirements: List[str] = Field(default_factory=list)
+    validation_notes: List[str] = Field(default_factory=list)
+    explicit_booking_endpoint: str
+    source: str = Field(description="catalog_fallback, crewai, or catalog_validation")
+    catalog_validated: bool
+
+
+class AssistantChatContext(BaseModel):
+    """Read-only conversational request tied to one canonical trip."""
+    model_config = ConfigDict(extra="forbid")
+    trip_id: str = Field(min_length=1, max_length=255)
+    message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def message_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message must not be blank")
+        return value
+
+
+class AssistantCrewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    response: str = Field(min_length=1, max_length=2000)
+    referenced_ids: List[str] = Field(default_factory=list, max_length=30)
+    suggested_actions: List[str] = Field(default_factory=list, max_length=5)
+
+
+class AssistantReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reference_id: str
+    reference_type: str
+    title: str
+    day_number: Optional[int] = None
+    status: Optional[str] = None
+
+
+class AssistantChatResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trip_id: str
+    message: str
+    response: str
+    references: List[AssistantReference] = Field(default_factory=list)
+    suggested_actions: List[str] = Field(default_factory=list)
+    source: str = Field(description="catalog_fallback or crewai")
+    context_validated: bool = True

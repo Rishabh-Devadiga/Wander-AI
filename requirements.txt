@@ -16,6 +16,8 @@ python-dotenv>=1.0.1
 
 # AI & LLM Integration (Google GenAI SDK)
 google-genai>=0.1.1
+# Agent orchestration for the bounded destination research workflow.
+crewai>=1.0.0,<2.0.0
 
 # Testing & HTTP Client
 pytest>=8.0.0
