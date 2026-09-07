@@ -11,9 +11,24 @@ from backend.schemas.schemas import (
     DestinationRead, HotelRead, ActivityRead, TransportRead,
     TripCreate, TripRead, TripUpdate, TripPreferenceRead, TripPreferenceUpdate,
     AIChatRequest, AIChatResponse, AIExtractPreferencesRequest, AIRecommendRequest,
-    AIGenerateItineraryRequest, AIReplanRequest
+    AIGenerateItineraryRequest, AIReplanRequest, ResearchContext, ResearchResult,
+    AccommodationContext, AccommodationResult, TransportationContext, TransportationResult,
+    ExperienceContext, ExperienceResult, ItineraryContext, ItineraryResult,
+    TripManagementContext, TripManagementResult, BookingRecommendationContext,
+    BookingRecommendationResult, AssistantChatContext, AssistantChatResult
 )
 from backend.ai.gemini_service import gemini_service
+from backend.research.service import DestinationResearchService, ResearchExecutionError
+from backend.accommodation.service import AccommodationRecommendationService, AccommodationExecutionError
+from backend.transportation.service import TransportationRecommendationService, TransportationExecutionError
+from backend.experience.service import ExperienceRecommendationService, ExperienceExecutionError
+from backend.itinerary.service import ItineraryExecutionError, ItineraryRecommendationService, ItineraryValidationError
+from backend.trip.service import TripManagementExecutionError, TripManagementService, TripManagementValidationError
+from backend.booking.service import (
+    BookingRecommendationExecutionError, BookingRecommendationService,
+    BookingRecommendationValidationError,
+)
+from backend.assistant.service import AssistantExecutionError, AssistantService, AssistantValidationError
 from backend.recommendation.engine import RecommendationEngine
 from backend.itinerary.generator import ItineraryGenerator
 from backend.replanning.engine import ReplanningEngine
@@ -385,8 +400,20 @@ def update_trip_preferences(
 # ----------------------------------------------------
 # AI Planning & Gemini Intelligence APIs
 # ----------------------------------------------------
+def _operator_assistant_response(result: AssistantChatResult) -> Dict[str, Any]:
+    return {
+        "reply": result.response,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "suggested_actions": result.suggested_actions,
+        "trip_id": result.trip_id,
+        "source": result.source,
+        "context_validated": result.context_validated,
+        "references": [ref.model_dump() for ref in result.references],
+    }
+
+
 @router.post("/operator/ai-assistant")
-def operator_ai_assistant(payload: AIChatRequest):
+def operator_ai_assistant(payload: AIChatRequest, db: Session = Depends(get_db)):
     """
     Operator-facing Gemini assistant.
 
@@ -394,17 +421,25 @@ def operator_ai_assistant(payload: AIChatRequest):
     FastAPI backend exposed only /api/ai/chat. Keep the operator route as a
     compatibility layer and return the response shape expected by the UI.
     """
-    context = dict(payload.session_context or {})
-    if payload.trip_id:
-        context["context_trip_id"] = payload.trip_id
-    context["assistant_mode"] = "operations"
-    context["instructions"] = (
-        "Act as TourFlow AI Operations Assistant. Give concise, practical operator guidance "
-        "for disruptions, routes, hotels, transport, vendors and guest communications. "
-        "If live operational data is not available in the supplied context, say so rather "
-        "than inventing live telemetry or bookings."
-    )
+    context_trip_id = payload.trip_id
+    if not context_trip_id and payload.current_trip:
+        current_trip_id = payload.current_trip.get("id") or payload.current_trip.get("trip_id")
+        if current_trip_id:
+            context_trip_id = str(current_trip_id)
 
+    if context_trip_id:
+        assistant_payload = AssistantChatContext(trip_id=context_trip_id, message=payload.message)
+        service = AssistantService(db, gemini_service)
+        try:
+            return _operator_assistant_response(service.execute(assistant_payload))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except AssistantValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AssistantExecutionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    context = dict(payload.session_context or {})
     result = gemini_service.chat(
         message=payload.message,
         session_context=context
@@ -436,6 +471,109 @@ def ai_extract_preferences(payload: AIExtractPreferencesRequest):
         text_prompt=payload.text_prompt,
         context=payload.context
     )
+
+@router.post("/research", response_model=ResearchResult)
+def research_destination(payload: ResearchContext, db: Session = Depends(get_db)):
+    """Return non-mutating, catalog-grounded destination research."""
+    service = DestinationResearchService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ResearchExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/accommodations/recommendations", response_model=AccommodationResult)
+def recommend_accommodations(payload: AccommodationContext, db: Session = Depends(get_db)):
+    """Return read-only, catalog-validated accommodation recommendations."""
+    service = AccommodationRecommendationService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AccommodationExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/transportation/recommendations", response_model=TransportationResult)
+def recommend_transportation(payload: TransportationContext, db: Session = Depends(get_db)):
+    """Return read-only, catalog-validated transportation recommendations."""
+    service = TransportationRecommendationService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TransportationExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/experiences/recommendations", response_model=ExperienceResult)
+def recommend_experiences(payload: ExperienceContext, db: Session = Depends(get_db)):
+    """Return read-only, catalog-validated experience recommendations."""
+    service = ExperienceRecommendationService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExperienceExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/itinerary/recommendations", response_model=ItineraryResult)
+def recommend_itinerary(payload: ItineraryContext, db: Session = Depends(get_db)):
+    """Return a read-only, catalog-validated multi-day itinerary recommendation."""
+    service = ItineraryRecommendationService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ItineraryValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ItineraryExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/trips/management/recommendations", response_model=TripManagementResult)
+def recommend_trip_management(payload: TripManagementContext, db: Session = Depends(get_db)):
+    """Return a read-only, catalog-validated, booking-ready trip-management view."""
+    service = TripManagementService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TripManagementValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TripManagementExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/bookings/recommendations", response_model=BookingRecommendationResult)
+def recommend_bookings(payload: BookingRecommendationContext, db: Session = Depends(get_db)):
+    """Return a read-only, catalog-validated booking-readiness view for a trip."""
+    service = BookingRecommendationService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BookingRecommendationValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except BookingRecommendationExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/assistant/chat", response_model=AssistantChatResult)
+def assistant_chat(payload: AssistantChatContext, db: Session = Depends(get_db)):
+    """Answer a traveler question from read-only, validated trip context."""
+    service = AssistantService(db, gemini_service)
+    try:
+        return service.execute(payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AssistantValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AssistantExecutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 @router.post("/ai/recommend")
 def ai_recommend(payload: AIRecommendRequest, db: Session = Depends(get_db)):

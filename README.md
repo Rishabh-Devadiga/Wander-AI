@@ -376,6 +376,10 @@ The Operator Suite (`/operator/*`) provides commercial management tools:
 | `POST` | `/api/trips/:id/apply-replan` | Apply chosen replanning option to the live itinerary. |
 | `POST` | `/api/ai/chat` | Conversational travel concierge interface with Gemini. |
 | `POST` | `/api/ai/extract-preferences` | Parse free-form prompt into structured travel parameters. |
+| `POST` | `/api/research` | Read-only destination Research Agent endpoint. Accepts `ResearchContext` and returns structured `ResearchResult`. |
+| `POST` | `/api/accommodations/recommendations` | Read-only Accommodation Agent endpoint. Accepts `AccommodationContext` and returns catalog-validated accommodation recommendations. |
+| `POST` | `/api/bookings/recommendations` | Read-only Booking & Reservation Agent endpoint. Accepts `BookingRecommendationContext` and returns catalog-derived booking readiness without creating reservations. |
+| `POST` | `/api/assistant/chat` | Read-only Assistant Agent endpoint. Accepts `AssistantChatContext` and answers from validated trip, itinerary, preference, catalog, and booking context. |
 | `POST` | `/api/ai/recommend` | Compute ranked catalog recommendations based on preferences. |
 | `POST` | `/api/ai/generate-itinerary` | Synthesize a full multi-day day-by-day itinerary. |
 | `POST` | `/api/ai/replan` | Execute autonomous contingency resolution for disruptions. |
@@ -583,7 +587,530 @@ npm run build
 
 ---
 
+## 15. Current Project Status
+
+### Implemented System
+
+- Frontend: React 19/Vite client under `src/`, using the unified API client in `src/services/api.ts`.
+- Backend: FastAPI production API under `backend/main.py`, with all current production routes mounted under `/api` from `backend/api/routes.py`.
+- Legacy server: `server.ts` remains in the repository for the integrated Node/Vite development path, but new production API functionality is implemented in FastAPI.
+- Database: SQLAlchemy models in `backend/models/models.py`, SQLite/PostgreSQL connection handling in `backend/database/connection.py`, and seeded destination/catalog data from `database/seed_data/seed.py`.
+- Gemini: Centralized backend Gemini integration in `backend/ai/gemini_service.py`; API keys remain server-side through `GEMINI_API_KEY`.
+- AI endpoints: existing chat, preference extraction, recommendation, itinerary generation, and replanning endpoints remain present.
+
+### Current AI / Agent Status
+
+- Research Agent: `COMPLETE / LIVE VERIFIED`.
+- Accommodation Agent: `COMPLETE / LIVE VERIFIED`. It provides read-only, catalog-validated hotel recommendations through one CrewAI agent and one task; it does not apply selections to a trip.
+- Transportation Agent: `COMPLETE / LIVE VERIFIED`. It provides read-only, catalog-validated transportation recommendations through FastAPI, CrewAI, and Gemini; it does not apply selections to a trip.
+- Experience Agent: `PARTIAL`. It provides read-only, catalog-validated activity recommendations through one CrewAI agent and one task. Its single live FastAPI request reached CrewAI and Gemini but returned HTTP 502 because outbound Gemini sockets are blocked in this environment.
+- Itinerary Planning Agent: `PARTIAL`. It produces read-only, catalog-validated multi-day itinerary recommendations through one CrewAI agent and one task. Its single live FastAPI request reached CrewAI and Gemini but returned HTTP 502 because outbound Gemini sockets are blocked in this environment.
+- Trip Management Agent: `PARTIAL`. It creates a read-only, catalog-validated trip-management view for an existing trip through one CrewAI agent and one task. Its required single live request returned HTTP 404 from the already-bound local port, so the request did not reach this route, CrewAI, or Gemini. Existing replanning remains in the established deterministic replanning engine and mutation routes.
+- Booking & Reservation Agent: `PARTIAL`. It derives booking-ready items from existing itinerary selections through one CrewAI agent and one task, without creating bookings. Its one live request returned HTTP 502 before a structured result could be validated.
+- Assistant Agent: `PARTIAL`. It answers read-only traveler questions from validated trip, itinerary, preference, catalog, and booking context through one CrewAI agent and one structured task. Automated tests and OpenAPI registration are verified; its single live FastAPI request reached CrewAI/Gemini but returned HTTP 502 because outbound Gemini sockets are blocked in this environment.
+- Replanning Agent: not implemented as a standalone CrewAI agent. Existing replanning engine and disruption/replan routes exist.
+
+### Research Agent
+
+- Status: `COMPLETE / LIVE VERIFIED`.
+- Purpose: provide destination research before downstream planning agents select inventory or build itineraries.
+- Responsibilities: destination overview, destination research, recommended areas, key places, attractions, travel considerations, seasonal considerations, and preference-relevant destination insights.
+- Explicitly out of scope: accommodation selection, transportation selection, booking, final itinerary generation, trip pricing, and dynamic replanning.
+- Input: `ResearchContext` in `backend/schemas/schemas.py`, including destination, optional origin, dates, duration, traveler count, budget, currency, pace, travel style, and optional existing `TripPreferenceBase`.
+- Output: `ResearchResult` in `backend/schemas/schemas.py`, including destination summary, recommended areas, key places, attractions, travel considerations, seasonal considerations, preference insights, and source.
+- CrewAI integration: `backend/research/crew.py` defines one CrewAI `Agent`, one structured `Task`, and a sequential `Crew`; raw Crew output is validated as `ResearchResult`. CrewAI 1.15.20 is installed in the current virtual environment.
+- Gemini integration: `GeminiService.generate_destination_research()` in `backend/ai/gemini_service.py` requests JSON-only bounded destination research from Gemini and rejects unavailable Gemini by raising an error.
+- Database/data-source integration: `DestinationResearchService` resolves the requested destination from the SQLAlchemy `Destination` catalog and passes catalog fields to the research workflow. It does not query hotels, transport, activities, bookings, or itinerary inventory for selection.
+- API/service integration: `POST /api/research` in `backend/api/routes.py` accepts `ResearchContext`, returns `ResearchResult`, returns 404 for unknown catalog destinations, 422 for invalid request shape, and 502 when configured AI output cannot be validated.
+- Non-mutation behavior: the service reads destination catalog records and does not create or update `Trip`, `TripPreference`, itinerary, booking, vendor, hotel, activity, transport, alert, notification, or change-history records.
+- Tests performed on 2026-09-06: `pytest tests -v` with `DATABASE_URL=sqlite:///./tourflow.db` and `GEMINI_API_KEY` cleared returned 14 passed / 21 warnings; `npm.cmd run lint` passed; Python AST parsing of backend/tests passed for 21 files.
+- Controlled API test on 2026-09-06: `POST /api/research` for Manali from Mumbai, 5 days, 2 travelers, INR 80,000, adventure/nature preferences returned HTTP 200 with `source=catalog_fallback`, a non-empty destination summary, one recommended area, no forbidden itinerary/booking/pricing fields, and unchanged trip count.
+- Build result on 2026-09-06: `npm.cmd run build` failed before bundling because Vite could not write `node_modules/.vite-temp/vite.config.ts.timestamp-*.mjs` due to Windows `EPERM`.
+- Known limitation: CrewAI 1.15.20 is installed and a controlled live request reached CrewAI and Gemini, but outbound socket access is blocked in this Windows environment (`WinError 10013`), so the route returned HTTP 502 and no live `ResearchResult` was produced.
+
+### Accommodation Agent
+
+- Status: `COMPLETE`.
+- Responsibility: recommend active catalog hotels for a validated destination and accommodation constraints only. It excludes destination research, activities, transport, itineraries, bookings, payments, trip pricing, and trip mutation.
+- Input/output: `AccommodationContext` and `AccommodationResult` in `backend/schemas/schemas.py`. The result returns catalog-backed option IDs and facts, AI recommendation reasons, and a source marker.
+- Catalog validation: `AccommodationRecommendationService` resolves the `Destination`, filters active `Hotel` records deterministically by currency, nightly-price cap, requested hotel categories, and required amenities, then validates every AI-selected ID against that filtered candidate set.
+- CrewAI/Gemini integration: `backend/accommodation/crew.py` defines one `Accommodation Selection Specialist`, one structured `Task`, and a sequential `Crew` using the configured central `gemini_service` credentials. It receives only valid catalog candidates and can return only hotel IDs plus recommendation text.
+- API: `POST /api/accommodations/recommendations` returns 404 for unknown destinations or no matching active catalog options, 422 for invalid request input, and 502 when configured CrewAI output cannot be validated.
+- Non-mutation behavior: recommendations never create or update `Trip`, itinerary items, bookings, inventory, vendors, or other persisted trip state. Existing trip accommodation change routes remain the explicit mutation path.
+- Verification on 2026-09-06: mocked backend tests passed (19 passed, 21 warnings); the route is included in OpenAPI; `npm.cmd run lint` passed. One controlled live request for Manali with an INR 13,000 nightly cap and boutique preference returned HTTP 200 with `source=crewai` and the catalog-backed `htl-manali-002` option.
+- Build result on 2026-09-06: `npm.cmd run build` remains blocked before bundling by Windows `EPERM` writing a Vite temporary config under `node_modules/.vite-temp`.
+
+### Transportation Agent
+
+- Status: `COMPLETE / LIVE VERIFIED`.
+- Responsibility: select and rank transportation only from active `TransportOption` catalog records. It excludes research, accommodation, activities, itinerary generation, booking, payments, replanning, and trip mutation.
+- Input/output: `TransportationContext`, `TransportationCrewOutput`, and `TransportationResult` in `backend/schemas/schemas.py`. Returned transport facts are rebuilt from catalog records after validation.
+- Catalog validation: `TransportationRecommendationService` resolves the requested `Destination` and deterministically filters active catalog records by origin, currency, traveler capacity, optional transport type, maximum price, and maximum duration. Every CrewAI-selected ID must belong to that filtered candidate set.
+- CrewAI/Gemini integration: `backend/transportation/crew.py` defines one Transportation Selection Specialist, one structured task, and one sequential Crew using the configured central `gemini_service` credentials. It receives only verified candidate data and returns only transport IDs with recommendation metadata.
+- API: `POST /api/transportation/recommendations` returns structured recommendations; it returns 404 for an unknown destination or no matching catalog candidates, 422 for invalid request input, and 502 when CrewAI output cannot be validated. Existing `POST /api/trips/{trip_id}/change-transport` remains the explicit mutation mechanism.
+- Non-mutation behavior: recommendation handling reads the catalog and does not create or update `Trip`, itinerary, booking, or transport records.
+- Verification on 2026-09-06: `venv\\Scripts\\python.exe -m compileall -q backend tests` passed; the complete backend test suite passed (23 passed, 21 warnings); OpenAPI includes `/api/transportation/recommendations`; the local catalog has three active Manali transport options; and `npm.cmd run lint` passed.
+- Live verification: `POST /api/transportation/recommendations` successfully reached the Transportation Agent; CrewAI and Gemini executed successfully; and the result returned `source: crewai` and `catalog_validated: true`. Active catalog transportation was successfully validated. Agent 3 live verification is complete.
+
+### Experience Agent
+
+- Status: `PARTIAL`.
+- Responsibility: select and rank activities only from active `Activity` catalog records. It excludes research, accommodation, transportation, itinerary generation, booking, payments, replanning, and trip mutation.
+- Input/output: `ExperienceContext`, `ExperienceCrewOutput`, and `ExperienceResult` in `backend/schemas/schemas.py`. Returned activity facts are rebuilt from catalog records after selection validation.
+- Catalog validation: `ExperienceRecommendationService` resolves the requested `Destination`, deterministically filters active activity records by currency, optional category, difficulty, maximum per-person price, and maximum duration, and rejects every AI-selected ID outside that filtered candidate set.
+- CrewAI/Gemini integration: `backend/experience/crew.py` defines one Experience Selection Specialist, one structured task, and one sequential Crew using the configured central `gemini_service` credentials. It receives only validated candidate data and returns only activity IDs with recommendation metadata.
+- API: `POST /api/experiences/recommendations` returns structured recommendations; it returns 404 for an unknown destination or no matching catalog candidates, 422 for invalid request input, and 502 when CrewAI output cannot be validated. Existing trip activity routes remain the explicit mutation path.
+- Non-mutation behavior: recommendations do not create or update `Trip`, itinerary, booking, activity, or other persisted state.
+- Verification on 2026-09-06: `venv\\Scripts\\python.exe -m compileall -q backend tests` passed; `venv\\Scripts\\python.exe -m pytest -q` passed (27 passed, 21 warnings); OpenAPI includes `/api/experiences/recommendations`; and `npm.cmd run lint` passed.
+- Controlled live verification on 2026-09-06: the single `POST /api/experiences/recommendations` request reached FastAPI, the Experience Agent, CrewAI, and Gemini but returned HTTP 502. Gemini socket requests failed with Windows `WinError 10013`, so no structured result was returned and Agent 4 is not live verified.
+
+### Itinerary Planning Agent
+
+- Status: `PARTIAL`.
+- Responsibility: build a multi-day plan from active catalog hotels, transport, and activities only. It excludes booking, payment, dynamic replanning, and any mutation of an existing trip or itinerary.
+- Input/output: strict `ItineraryContext`, `ItineraryCrewOutput`, and `ItineraryResult` schemas in `backend/schemas/schemas.py` reject unexpected fields. Returned hotel, transport, activity, and cost facts are rebuilt from catalog records.
+- Catalog validation: `ItineraryRecommendationService` resolves the destination, filters active inventory by destination, currency, transport capacity, and optional origin, validates every selected hotel, transport, and activity ID, rejects repeated activities, schedules catalog activities without overlap, and calculates total cost from catalog prices.
+- CrewAI/Gemini integration: `backend/itinerary/crew.py` defines one Itinerary Planning Specialist, one structured task, and one sequential Crew using the configured central `gemini_service` credentials. It receives only validated candidate records.
+- API: `POST /api/itinerary/recommendations` returns a structured, non-mutating itinerary. It returns 404 for missing catalog inventory, 422 for invalid constraints, duration, or budget, and 502 when CrewAI output cannot be validated. Existing trip and itinerary mutation routes are unchanged.
+- Verification on 2026-09-06: `venv\\Scripts\\python.exe -m compileall -q backend tests` passed; `venv\\Scripts\\python.exe -m pytest -q` passed (30 passed, 21 warnings); OpenAPI includes `/api/itinerary/recommendations` with `ItineraryResult`; and `npm.cmd run lint` passed.
+- Controlled live verification on 2026-09-06: the one `POST /api/itinerary/recommendations` request reached FastAPI, the Itinerary Planning Agent, CrewAI, and Gemini but returned HTTP 502. Gemini socket requests failed with Windows `WinError 10013`, so no validated `source=crewai`, `catalog_validated=true` response was returned.
+
+### Trip Management Agent
+
+- Status: `PARTIAL`.
+- Responsibility: assemble a booking-ready management view from an existing `Trip`, its validated catalog destination, existing itinerary references, and active accommodation, transport, and activity inventory. It does not replace Research, Accommodation, Transportation, Experience, or Itinerary Planning agents.
+- Architecture: `backend/trip/crew.py` defines exactly one Trip Management and Booking Specialist, one Pydantic-structured task, and one sequential Crew. `backend/trip/service.py` runs the read-only workflow and `backend/trip/__init__.py` exposes the package.
+- Input/output: strict `TripManagementContext`, `TripManagementCrewOutput`, `TripManagementActivity`, `TripManagementItineraryReference`, and `TripManagementResult` schemas are defined in `backend/schemas/schemas.py`. The result includes trip/destination identifiers, rebuilt accommodation, transportation, activities, itinerary references, total catalog cost, currency, booking readiness, notes, source, and catalog-validation state.
+- Catalog validation and pricing: the service accepts only the supplied trip ID, filters active same-destination inventory by the trip currency and transport capacity, validates every Crew-selected ID and itinerary reference, rebuilds returned facts from SQLAlchemy records, rejects duplicate or inactive/unknown IDs, and calculates the total from catalog prices, trip duration, and traveler count. Existing bookings are read only.
+- API: `POST /api/trips/management/recommendations` returns `TripManagementResult`; it returns 404 for a missing trip or required active inventory, 422 for invalid trip/catalog selections or budgets, and 502 when configured CrewAI output cannot be validated. Existing trip change and booking routes remain the only mutation mechanisms.
+- Non-mutation behavior: this endpoint does not change trips, itinerary items, catalog records, bookings, payments, or reservations.
+- Verification on 2026-09-06: `venv\\Scripts\\python.exe -m compileall -q backend tests` passed; `venv\\Scripts\\python.exe -m pytest -q` passed (33 passed, 21 warnings); OpenAPI includes `/api/trips/management/recommendations` with `TripManagementResult`; and `npm.cmd run lint` passed. Focused tests cover valid requests, strict schemas, route registration, invalid or inactive catalog IDs, catalog-derived totals, non-mutation, and Crew-output validation.
+- Build result on 2026-09-06: `npm.cmd run build` failed before bundling because Vite could not write a temporary config under `node_modules/.vite-temp` due to Windows `EPERM`.
+- Live verification on 2026-09-06: the required single `POST /api/trips/management/recommendations` request to the already-bound local FastAPI port returned HTTP 404. It did not invoke Agent 6, CrewAI, or Gemini, and it did not return `source=crewai` or `catalog_validated=true`.
+
+### Booking & Reservation Agent
+
+- Status: `PARTIAL`.
+- Purpose: convert existing validated itinerary selections into a booking-ready, catalog-derived checklist. It does not replace Research, Accommodation, Transportation, Experience, Itinerary, Trip Management, or the existing replanning engine.
+- Backend location: `backend/booking/crew.py` and `backend/booking/service.py`; the package is exposed by `backend/booking/__init__.py`.
+- API/input/output: `POST /api/bookings/recommendations` accepts strict `BookingRecommendationContext` and returns `BookingRecommendationResult`. `BookingCrewOutput` controls the structured Crew output; `BookingRecommendationItem` represents rebuilt booking facts. All schemas are in `backend/schemas/schemas.py`.
+- CrewAI/Gemini: `BookingRecommendationCrew` defines exactly one Booking and Reservation Specialist, one Pydantic structured task, and one sequential Crew using centralized `gemini_service` credentials. The Crew is given only catalog-validated selection keys and may only preserve those keys plus explanatory notes.
+- Catalog and booking data: the service loads the canonical `Trip`, destination, traveler count, currency, budget, itinerary, and `Booking` records. It validates hotel, transport, and activity IDs against the trip destination; requires active inventory, matching currency, positive activity duration, and sufficient transport capacity; then rebuilds names, descriptions, costs, and existing booking references from SQLAlchemy models. Totals use hotel nights, transport quantities, activity occurrences, and traveler count.
+- Mutation behavior: repeat calls do not create `Booking` rows or change trips, itinerary items, payments, reservations, or catalog records. The response identifies the existing explicit action endpoint, `POST /api/trips/{trip_id}/lock-booking`, which remains the sole reservation-creation path.
+- Booking readiness: incomplete itinerary selections return `missing_selection`; catalog totals over the trip budget return `over_budget`; valid selections return `ready`. Stale, inactive, invalid, or insufficient-capacity catalog references are rejected with 422 and are never returned as booking items.
+- Automated verification on 2026-09-06: Python compile checks passed; `venv\\Scripts\\python.exe -m pytest tests -q` passed (37 passed, 30 warnings); OpenAPI contains the Agent 7 route and `BookingRecommendationResult`; and `npm.cmd run lint` passed. Focused tests cover canonical selections, existing booking references, no mutation/duplicates, unknown trips, strict input schema, missing selections, budget checks, invalid/inactive catalog records, capacity validation, Crew output validation, and malformed Crew handling.
+- Build result on 2026-09-06: `npm.cmd run build` failed before bundling because Vite could not write a temporary config under `node_modules/.vite-temp` due to Windows `EPERM`.
+- Live verification on 2026-09-06: FastAPI was started on port 8001 because the existing port-8000 listener could not be inspected. Its OpenAPI document included `/api/bookings/recommendations`. The single request against an existing canonical trip returned HTTP 502 (`Booking recommendations could not be validated`) before a structured result was returned. The response contained neither `source=crewai` nor `catalog_validated=true`; CrewAI/Gemini successful execution was not demonstrated.
+
+### Assistant Agent
+
+- Status: `PARTIAL`.
+- Purpose: provide a conversational traveler interface over an existing canonical trip without generating itineraries, optimizing bookings, or replanning disruptions.
+- Backend location: `backend/assistant/crew.py` and `backend/assistant/service.py`; the package is exposed by `backend/assistant/__init__.py`.
+- Architecture: `AssistantCrew` defines exactly one CrewAI Assistant Specialist, one Pydantic-structured task, and one sequential Crew using centralized `gemini_service` credentials.
+- API/input/output: `POST /api/assistant/chat` accepts strict `AssistantChatContext` with `trip_id` and `message`, and returns `AssistantChatResult` with `trip_id`, original message, response, validated references, suggested actions, `source`, and `context_validated`.
+- Grounding behavior: `AssistantService` validates the trip and catalog destination, loads existing itinerary, preferences, bookings, active hotels, active activities, and active transport options, rejects stale or inactive catalog references, and rebuilds catalog IDs, titles, costs, booking totals, and itinerary totals before invoking CrewAI.
+- Mutation behavior: the endpoint is read-only. It does not create bookings, cancel bookings, modify trips, change preferences, edit itineraries, change hotels, change transport, add/delete activities, trigger disruptions, or apply replans. Mutation requests are answered as requiring explicit existing trip or booking operations.
+- Frontend integration: `src/services/api.ts` exposes `TourFlowApi.chatWithAssistant(tripId, message)` for the FastAPI route. No new UI surface was added.
+- Automated verification on 2026-09-07: `venv\\Scripts\\python.exe -m compileall -q backend tests` passed; `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q` passed (41 passed, 30 warnings); OpenAPI includes `/api/assistant/chat` with `AssistantChatContext` and `AssistantChatResult`; and `npm.cmd run lint` passed. Assistant tests cover valid Crew-backed response, missing trip, empty message, itinerary references, existing booking counts, preference questions, catalog-grounded cost/day fallback responses, invalid catalog context, malformed Crew output, OpenAPI registration, and non-mutation.
+- Build result on 2026-09-07: `npm.cmd run build` failed before bundling because Vite could not write a temporary config under `node_modules/.vite-temp` due to Windows `EPERM`.
+- Live verification on 2026-09-07: local FastAPI was started on port 8002 and one `POST /api/assistant/chat` request was sent for `trp-manali-alpine-demo-001`. The request reached the Assistant Agent, CrewAI, and Gemini but returned HTTP 502 (`Assistant response could not be validated`) because Gemini socket access failed with Windows `WinError 10013`. The response did not return `source=crewai` or `context_validated=true`.
+- Mutation verification on 2026-09-07: before and after the live request, the demo trip remained `confirmed` with 5 itinerary items and 1 booking.
+
+### Current Agent Roadmap
+
+| Agent | Purpose | Status |
+|:---|:---|:---|
+| 1. Research Agent | Destination research and contextual travel intelligence | Complete / Live Verified |
+| 2. Accommodation Agent | Catalog-grounded accommodation selection | Complete / Live Verified |
+| 3. Transportation Agent | Catalog-grounded transportation selection | Complete / Live Verified |
+| 4. Experience Agent | Catalog-grounded activity and experience recommendations | Partial |
+| 5. Itinerary & Optimization Agent | Multi-day itinerary planning and optimization | Partial |
+| 6. Trip Management / Replanning | Read-only trip management; existing replanning engine handles disruption routes | Partial |
+| 7. Booking & Reservation Agent | Booking readiness and validated reservation recommendations | Partial |
+| 8. Assistant Agent | Read-only conversational answers over validated trip context | Partial |
+| 9. Replanning Agent | Standalone CrewAI disruption replanning agent | Not implemented |
+
+---
+
 ## AI Development Context / Change Log
+
+### 2026-09-07 Python Environment and Pylance Import Repair
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the Assistant Agent implementation, `backend/api/routes.py`, `backend/assistant/service.py`, `backend/assistant/crew.py`, `requirements.txt`, virtual-environment contents, and installed-package metadata.
+- The checked-in `venv` directory, which contained only a partial `Lib` directory and no Windows interpreter executable after the virtual environment had been removed.
+
+Changed:
+
+- Recreated the ignored project virtual environment with Python 3.12.0 at `venv\\Scripts\\python.exe`.
+- Corrected `.gitignore` so this local virtual environment is not tracked.
+- Installed the versions selected by the existing requirement ranges, including FastAPI 0.141.1, SQLAlchemy 2.0.52, CrewAI 1.15.20, and crewai-core 1.15.20. No application source or dependency declaration was changed.
+- Confirmed that CrewAI 1.15.20 provides the valid `crewai_core.paths` module and its `db_storage_path` function, so the Windows storage-path override in the Agent implementations remains unchanged.
+
+Tests/checks performed:
+
+- Direct imports of FastAPI, `sqlalchemy.orm.Session`, CrewAI's public API, and `crewai_core.paths`: passed.
+- `venv\\Scripts\\python.exe -m compileall -q backend tests`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (43 passed, 32 warnings).
+
+Known remaining issues:
+
+- The virtual environment is intentionally local and ignored; VS Code must select `C:\\Repo\\Wander-AI\\venv\\Scripts\\python.exe` for Pylance to use these packages.
+
+### 2026-09-07 Assistant Agent
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the Agent 8 pasted brief, existing Agent 1--7 service/route/schema/test patterns, `backend/assistant/`, FastAPI routes, Pydantic schemas, SQLAlchemy trip/catalog/booking models, deterministic seed trip data, frontend API client, and backend tests.
+
+Changed:
+
+- Completed the read-only Agent 8 Assistant implementation already present under `backend/assistant/`.
+- Enriched validated Assistant context with catalog IDs, catalog-derived itinerary item costs, itinerary totals, booking totals, dietary requirements, and special requests before CrewAI receives the payload.
+- Expanded deterministic catalog fallback handling for cost/budget, booking/reservation, preference, activity, Day N, and tomorrow-style questions.
+- Added focused tests for grounded fallback answers about trip cost, existing bookings, and Day 3 activity context.
+- Documented Agent 8 endpoint, architecture, schemas, grounding behavior, read-only policy, frontend API method, verification, and roadmap status.
+
+Files modified:
+
+- `backend/assistant/service.py`
+- `tests/test_backend.py`
+- `README.md`
+
+API added:
+
+- `POST /api/assistant/chat` accepts `AssistantChatContext` and returns `AssistantChatResult`.
+
+Architecture changes:
+
+- Agent 8 follows the existing FastAPI service-layer and CrewAI pattern with one Assistant Specialist, one Pydantic-structured task, and one sequential Crew.
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (41 passed, 30 warnings).
+- `venv\\Scripts\\python.exe -m compileall -q backend tests`: passed.
+- OpenAPI assertion for `/api/assistant/chat`, `AssistantChatContext`, and `AssistantChatResult`: passed.
+- `npm.cmd run lint`: passed.
+- `npm.cmd run build`: failed before bundling because Vite could not write `node_modules/.vite-temp/vite.config.ts.timestamp-1788719506094-39d34fec96109.mjs` due to Windows `EPERM`.
+- One live `POST /api/assistant/chat` request to local FastAPI on port 8002 returned HTTP 502 after CrewAI/Gemini socket attempts failed with Windows `WinError 10013`. The response did not return `source=crewai` or `context_validated=true`.
+- Live mutation snapshot remained unchanged: `status=confirmed`, 5 itinerary items, and 1 booking before and after the request.
+
+Known remaining issues:
+
+- Agent 8 is `PARTIAL`: successful live CrewAI/Gemini execution was not demonstrated in this environment because outbound Gemini sockets are blocked by Windows `WinError 10013`.
+
+### 2026-09-06 Booking & Reservation Agent
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, `backend/main.py`, FastAPI routes, Pydantic schemas, SQLAlchemy catalog/trip/itinerary/booking models, database configuration, centralized Gemini service, Agents 1--6, seed data, backend tests, frontend API client, and traveler/operator booking UI.
+- The canonical booking mutation route, `POST /api/trips/{trip_id}/lock-booking`, and operator booking routes.
+
+Changed:
+
+- Added the read-only Agent 7 workflow under `backend/booking/` with exactly one CrewAI Booking and Reservation Specialist, one Pydantic-structured task, and one sequential Crew.
+- Added `BookingRecommendationContext`, `BookingCrewOutput`, `BookingRecommendationItem`, and `BookingRecommendationResult` schemas.
+- Added `POST /api/bookings/recommendations`. It derives selections only from the existing trip itinerary and booking state; it neither creates bookings nor changes the trip.
+- Added deterministic hotel, transport, and activity catalog validation; catalog-derived quantity/cost calculation; existing booking-reference handling; missing-selection and over-budget readiness responses; and Crew output key validation.
+- Added `TourFlowApi.getBookingRecommendations(tripId)` so both existing traveler and operator UI flows can consume the canonical FastAPI response without a frontend-only booking state.
+- Added focused backend tests and updated the API reference, agent status, Agent 1--7 roadmap, and verification record.
+
+Files created:
+
+- `backend/booking/__init__.py`
+- `backend/booking/crew.py`
+- `backend/booking/service.py`
+
+Files modified:
+
+- `backend/schemas/schemas.py`
+- `backend/api/routes.py`
+- `src/services/api.ts`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\booking\\__init__.py backend\\booking\\crew.py backend\\booking\\service.py backend\\schemas\\schemas.py backend\\api\\routes.py tests\\test_backend.py`: passed.
+- `venv\\Scripts\\python.exe -m compileall -q backend tests`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests -q`: passed (37 passed, 30 warnings).
+- OpenAPI verification confirmed all existing Agent 1--6 routes and `/api/bookings/recommendations`; Agent 7's 200 schema is `BookingRecommendationResult`.
+- `npm.cmd run lint`: passed.
+- `npm.cmd run build`: failed before bundling because Vite could not write `node_modules/.vite-temp/vite.config.ts.timestamp-*.mjs` due to Windows `EPERM`.
+- One live Agent 7 request to the locally started FastAPI app on port 8001 returned HTTP 502. It did not return a structured response, `source=crewai`, or `catalog_validated=true`.
+
+Known remaining issues:
+
+- Agent 7 is `PARTIAL`: its one permitted live request returned `Booking recommendations could not be validated`, so successful CrewAI/Gemini execution and a live catalog-validated result were not demonstrated.
+
+### 2026-09-06 Trip Management & Booking Agent Verification
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the existing Agent 1--5 implementations, FastAPI routes, Pydantic schemas, SQLAlchemy trip/catalog/booking models, seed data, CrewAI/Gemini configuration, and backend tests.
+- The existing `backend/trip/` implementation, which contains the single-agent, single-task sequential Crew workflow and non-mutating catalog-validation service.
+
+Changed:
+
+- Updated `README.md` to document the existing Agent 6 implementation, its endpoint, schemas, catalog validation, non-mutation boundary, verification results, and `PARTIAL` status.
+- Corrected the agent roadmap so Agent 6 is Trip Management & Booking and Replanning follows as Agent 7.
+
+Files modified:
+
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m compileall -q backend tests`: passed.
+- `venv\\Scripts\\python.exe -m pytest -q`: passed (33 passed, 21 warnings).
+- OpenAPI assertion for `/api/trips/management/recommendations` and its `TripManagementResult` response: passed.
+- `npm.cmd run lint`: passed.
+- `npm.cmd run build`: failed before bundling because Vite could not write `node_modules/.vite-temp/vite.config.ts.timestamp-*.mjs` due to Windows `EPERM`.
+- The exactly one live `POST /api/trips/management/recommendations` request to the already-bound localhost port returned HTTP 404. It did not reach Agent 6, CrewAI, or Gemini, and returned neither `source=crewai` nor `catalog_validated=true`.
+
+Known remaining issues:
+
+- Agent 6 is not live verified because the already-bound local server did not expose the route; its one permitted live verification request returned HTTP 404.
+
+### 2026-09-06 Itinerary Planning Agent
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, Agent 1–4 implementations, the existing itinerary generator, Pydantic schemas, FastAPI routes, SQLAlchemy catalog and itinerary models, Gemini/CrewAI configuration, trip mutation routes, seed data, and backend tests.
+
+Changed:
+
+- Added `backend/itinerary/crew.py` and `backend/itinerary/service.py` without replacing the existing itinerary generator.
+- Added strict itinerary request, Crew output, catalog-fact, item, day, and result schemas.
+- Added deterministic filtering of active hotels, transport, and activities before CrewAI execution; every selected ID is checked against its candidate set before catalog facts and costs are rebuilt.
+- Added non-overlapping activity scheduling, distinct-activity validation, duration validation, and catalog-price budget validation.
+- Added `POST /api/itinerary/recommendations`; it is read-only and preserves existing explicit trip/itinerary mutation routes.
+- Added focused tests for request validation, mocked CrewAI success, catalog fact rebuilding, unknown ID rejection, inactive activity filtering, budget validation, non-mutation, and OpenAPI endpoint registration.
+
+Files created:
+
+- `backend/itinerary/crew.py`
+- `backend/itinerary/service.py`
+
+Files modified:
+
+- `backend/schemas/schemas.py`
+- `backend/api/routes.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m compileall -q backend tests`: passed.
+- `venv\\Scripts\\python.exe -m pytest -q`: 30 passed, 21 warnings.
+- OpenAPI contains `POST /api/itinerary/recommendations` with `ItineraryResult`.
+- `npm.cmd run lint`: passed.
+- One controlled live `POST /api/itinerary/recommendations` request through FastAPI, Agent 5, CrewAI, Gemini, and catalog validation: HTTP 502. Gemini outbound sockets were blocked by Windows `WinError 10013`; no validated result was returned and no further live request was made.
+
+### 2026-09-06 Experience Agent
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the Agent 1–3 CrewAI services, schemas, routes, tests, centralized Gemini service, `Activity` model, activity catalog endpoint, trip activity mutation routes, and seeded activity catalog.
+
+Changed:
+
+- Added the read-only Experience Agent under `backend/experience/` with one CrewAI agent, one structured task, and one sequential Crew.
+- Added `ExperienceContext`, selection, crew-output, catalog-backed option, and result schemas without creating parallel activity or trip models.
+- Added deterministic active-activity filtering and validation of every AI-selected activity ID against the filtered catalog candidates.
+- Added `POST /api/experiences/recommendations`; it does not mutate trip state and leaves existing trip activity routes as the explicit mutation mechanism.
+- Added focused mocked tests for request success, input and destination validation, empty catalog handling, deterministic fallback, invalid AI IDs, malformed AI output, and no trip mutation.
+
+Files created:
+
+- `backend/experience/__init__.py`
+- `backend/experience/crew.py`
+- `backend/experience/service.py`
+
+Files modified:
+
+- `backend/schemas/schemas.py`
+- `backend/api/routes.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m compileall -q backend tests`: passed.
+- `venv\\Scripts\\python.exe -m pytest -q`: 27 passed, 21 warnings.
+- OpenAPI includes `POST /api/experiences/recommendations` with the `ExperienceResult` response schema.
+- `npm.cmd run lint`: passed.
+- One controlled live `POST /api/experiences/recommendations` request through FastAPI, CrewAI, Gemini, and catalog validation: HTTP 502. Gemini outbound sockets were blocked by Windows `WinError 10013`; no validated result was returned and no further live request was made.
+
+### 2026-09-06 Transportation Agent Live Verification
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, models, schemas, database connection, centralized Gemini service, existing Research and Accommodation Agent implementations, API routes, seed transport catalog, requirements, and backend tests.
+- The existing `backend/transportation/` implementation, including its CrewAI workflow and catalog-grounded recommendation service.
+
+Verified:
+
+- The read-only Transportation Agent uses one CrewAI agent, one structured task, and one sequential Crew.
+- The service filters active `TransportOption` records deterministically and rejects CrewAI-selected IDs outside its validated candidates before rebuilding response facts from the catalog.
+- `POST /api/transportation/recommendations` is mounted under `/api`; it does not mutate trip state, while the existing trip transport-change route remains available for explicit mutation.
+- Python compile checks passed; `venv\\Scripts\\python.exe -m pytest -q` passed (23 passed, 21 warnings); OpenAPI contains the transportation endpoint; `npm.cmd run lint` passed.
+- `POST /api/transportation/recommendations` successfully reached the Transportation Agent.
+- CrewAI executed successfully and Gemini execution succeeded.
+- The structured result returned `source: crewai` and `catalog_validated: true`.
+- Active catalog transportation was successfully validated; Agent 3 is `COMPLETE / LIVE VERIFIED`.
+
+### 2026-09-06 Accommodation Agent
+
+Inspected:
+
+- Existing SQLAlchemy `Destination`, `Hotel`, `Trip`, and `TripPreference` models; Pydantic schemas; database connection; centralized Gemini service; Research Agent implementation; FastAPI routes; hotel endpoints; trip accommodation update routes; seed catalog; requirements; and backend tests.
+
+Changed:
+
+- Added the read-only Accommodation Agent under `backend/accommodation/` with one CrewAI agent and one structured task.
+- Added `AccommodationContext`, Crew selection, catalog-backed option, and result schemas without creating parallel hotel or trip models.
+- Added deterministic active-hotel filtering and validation of every AI-selected hotel ID against the filtered catalog candidates.
+- Added `POST /api/accommodations/recommendations`; it does not modify trip state or replace existing hotel or trip-accommodation APIs.
+- Added focused mocked tests for request success, input and destination validation, no catalog candidates, catalog fallback, invalid AI IDs, Crew failure, structured selection validation, and no trip mutation.
+- Updated the API reference, Accommodation Agent status, roadmap, and verification documentation.
+
+Files created:
+
+- `backend/accommodation/__init__.py`
+- `backend/accommodation/crew.py`
+- `backend/accommodation/service.py`
+
+Files modified:
+
+- `backend/schemas/schemas.py`
+- `backend/api/routes.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- Python compile checks for the new accommodation modules, routes, schemas, and tests: passed.
+- `DATABASE_URL=sqlite:///./tourflow.db` and `GEMINI_API_KEY` cleared: `venv\\Scripts\\python.exe -m pytest tests -q` passed (19 passed, 21 warnings).
+- OpenAPI includes `/api/accommodations/recommendations`.
+- `npm.cmd run lint`: passed.
+- `npm.cmd run build`: failed before bundling because Vite could not write a temporary configuration file in `node_modules/.vite-temp` due to Windows `EPERM`.
+- One controlled live `POST /api/accommodations/recommendations` request through FastAPI, CrewAI, Gemini, and catalog validation: HTTP 200 with `source=crewai` and catalog hotel `htl-manali-002`.
+
+### 2026-09-06 CrewAI Live Validation
+
+Inspected:
+
+- The existing Research Agent workflow in `backend/research/crew.py` and `backend/research/service.py`.
+- The `POST /api/research` FastAPI route, research schemas, current virtual environment, and local SQLite catalog database.
+- Installed CrewAI storage-path behavior on Windows after its task-output database could not be initialized in the configured Windows app-data location.
+
+Changed:
+
+- Confirmed the existing `crewai>=1.0.0,<2.0.0` dependency is installed in `venv`; installed version is 1.15.20 and no dependency versions changed.
+- Added a Windows-only CrewAI internal storage-path override in the existing Research Agent before CrewAI imports. It directs CrewAI's ephemeral task-output database to the writable system temporary directory. The agent role, task, Gemini model selection, route, and `ResearchResult` contract are unchanged.
+- Updated the Research Agent status and known limitation to reflect the live validation result.
+
+Files modified:
+
+- `backend/research/crew.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m pip install --disable-pip-version-check --no-input 'crewai>=1.0.0,<2.0.0'`: requirement already satisfied at 1.15.20.
+- `venv\\Scripts\\python.exe -m py_compile backend\\research\\crew.py`: passed.
+- One controlled `POST /api/research` execution using the existing FastAPI route, CrewAI implementation, Gemini configuration, and local SQLite catalog: HTTP 502. CrewAI reached Gemini, but each internal attempt failed with Windows socket error `WinError 10013`; no validated `ResearchResult` was returned. No further live requests were made.
+- `DATABASE_URL=sqlite:///./tourflow.db` and `GEMINI_API_KEY` cleared: `venv\\Scripts\\python.exe -m pytest tests -v` passed (14 passed, 21 warnings).
+
+Known remaining issues:
+
+- This environment blocks outbound sockets required by Gemini, preventing a successful live `ResearchResult` and FastAPI 200 response. The single CrewAI request made three internal failed Gemini attempts before returning HTTP 502.
+
+### 2026-09-06 Verification Pass
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, and the existing `AI Development Context / Change Log`.
+- Repository file list excluding virtualenv and generated cache paths.
+- Research implementation files under `backend/research/`.
+- FastAPI route integration in `backend/main.py` and `backend/api/routes.py`.
+- Research schemas in `backend/schemas/schemas.py`.
+- Gemini integration in `backend/ai/gemini_service.py`.
+- SQLAlchemy catalog and trip models in `backend/models/models.py`.
+- Database connection/config files, requirements, package scripts, and backend tests.
+- Current Python environment package availability for `crewai` and `google.genai`.
+
+Changed:
+
+- Updated `README.md` only.
+- Added `POST /api/research` to the README API reference.
+- Added `Current Project Status`, `Research Agent`, and `Agent Roadmap` documentation.
+- Documented verification evidence, test results, known limitations, and current agent implementation status.
+
+Files modified:
+
+- `README.md`
+
+Tests/checks performed:
+
+- `pytest tests -v` with `DATABASE_URL=sqlite:///./tourflow.db` and `GEMINI_API_KEY` cleared: 14 passed, 21 warnings.
+- Controlled no-credit `POST /api/research` request through FastAPI `TestClient`: HTTP 200, valid catalog fallback `ResearchResult`, no forbidden response fields, trip count unchanged.
+- Python AST parse check for backend and tests: 21 files parsed successfully.
+- `npm.cmd run lint`: passed.
+- `npm.cmd run build`: failed because Vite could not write a temporary config file under `node_modules/.vite-temp` due to Windows `EPERM`.
+
+Known remaining issues:
+
+- `crewai` is declared in `requirements.txt` but was not installed in the current `venv`, so live CrewAI execution was not verified.
+- Live Gemini-backed research output was not tested during this verification pass to avoid unnecessary API-credit usage.
+- The local build remains blocked by the same Vite `node_modules/.vite-temp` Windows permission error observed during verification.
+
+### 2026-09-06
+
+Inspected:
+
+- `Agents.md`, `README.md`, and its prior change-log entries.
+- FastAPI application and routes in `backend/main.py` and `backend/api/routes.py`.
+- Existing Gemini service, SQLAlchemy destination catalog models, Pydantic schemas, seed data, requirements, and backend tests.
+- The installed Python environment, which did not contain CrewAI before this change.
+
+Changed:
+
+- Added the read-only destination Research Agent workflow under `backend/research/`.
+- Added `POST /api/research`, accepting `ResearchContext` and returning validated `ResearchResult`.
+- Added focused research schemas, reusing the existing `TripPreferenceBase` rather than creating a parallel preference or trip-state model.
+- Added centralized `GeminiService.generate_destination_research`, which requests JSON only and explicitly excludes itinerary, inventory selection, transport, accommodation, price, and booking work.
+- Added catalog-grounded behavior when Gemini is not configured; it only uses destination catalog fields and does not mutate database records.
+- Added the `crewai` deployment dependency. When installed, the workflow runs one CrewAI `Agent` and one structured `Task` using the existing Gemini key; when absent locally, the same route uses the centralized Gemini service to preserve the response contract.
+- Added focused tests for complete and partial context, validation failures, unknown destinations, crew execution seam, Gemini failure, and malformed output.
+
+Files created:
+
+- `backend/research/__init__.py`
+- `backend/research/crew.py`
+- `backend/research/service.py`
+
+Files modified:
+
+- `backend/schemas/schemas.py`
+- `backend/ai/gemini_service.py`
+- `backend/api/routes.py`
+- `requirements.txt`
+- `tests/test_backend.py`
+- `README.md`
+
+API added:
+
+- `POST /api/research` — resolves a catalog destination and returns non-mutating structured destination research. It returns 404 for unknown catalog destinations, 422 for invalid request context, and 502 when configured Gemini/Crew research output cannot be validated.
+
+Implementation details:
+
+- Research never creates or edits `Trip`, `TripPreference`, itinerary items, bookings, vendors, hotels, transport, or activity inventory.
+- The response `source` is `catalog_fallback` when Gemini is unavailable, otherwise `gemini` (or `crewai` when a CrewAI executor returns that source).
 
 ### 2026-09-04
 

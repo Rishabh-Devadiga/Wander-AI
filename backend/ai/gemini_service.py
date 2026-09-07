@@ -170,6 +170,35 @@ class GeminiService:
             "top_k": top_k
         }
 
+    def generate_destination_research(self, catalog_context: Dict[str, Any], traveler_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Produce bounded, structured destination context; never inventory or an itinerary."""
+        if not self.is_available() or not self.client:
+            raise RuntimeError("Gemini is unavailable")
+        prompt = f"""
+You are TourFlow AI's destination research specialist. Return ONLY valid JSON.
+Use the catalog destination below as authoritative. Traveler constraints are ground truth.
+Do not select/rank hotels, transport, vendors, bookable inventory, prices, bookings,
+or make a day-by-day itinerary. Do not invent availability or schedules.
+Catalog: {json.dumps(catalog_context)}
+Traveler context: {json.dumps(traveler_context)}
+Return this exact object shape:
+{{"destination":"string","destination_summary":"string","recommended_areas":[{{"name":"string","category":"string","area_location":"string|null","description":"string","relevance_to_traveler":"string|null","practical_notes":"string|null"}}],"key_places":[],"attractions":[],"travel_considerations":["string"],"seasonal_considerations":["string"],"preference_relevant_insights":["string"],"source":"gemini"}}
+"""
+        last_error = None
+        for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]:
+            try:
+                response = self.client.models.generate_content(
+                    model=model, contents=prompt,
+                    config={"response_mime_type": "application/json", "temperature": 0.2},
+                )
+                text = (response.text or "").strip()
+                if text:
+                    return json.loads(text)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Destination research model %s failed: %s", model, exc)
+        raise RuntimeError("Gemini destination research failed") from last_error
+
     def generate_full_trip_plan(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate a complete structured trip plan strictly adhering to the TourFlow AI schema:

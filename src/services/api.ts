@@ -311,6 +311,33 @@ export const TourFlowApi = {
     return await res.json();
   },
 
+  // Read-only booking readiness. Creating a reservation remains an explicit trip action.
+  async getBookingRecommendations(tripId: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/bookings/recommendations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trip_id: tripId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to get booking recommendations' }));
+      throw new Error(err.detail || 'Failed to get booking recommendations');
+    }
+    return await res.json();
+  },
+
+  async chatWithAssistant(tripId: string, message: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/assistant/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trip_id: tripId, message }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Assistant request failed' }));
+      throw new Error(err.detail || 'Assistant request failed');
+    }
+    return await res.json();
+  },
+
   async updateBookingAction(bookingId: string, action: 'confirm' | 'cancel' | 'rebook'): Promise<any> {
     const res = await fetch(`${API_BASE}/operator/bookings/${bookingId}/action`, {
       method: 'POST',
