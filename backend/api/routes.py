@@ -601,6 +601,21 @@ def ai_generate_itinerary(payload: AIGenerateItineraryRequest, db: Session = Dep
         prompt_or_prefs=payload.preferences
     )
 
+
+@router.post("/trips/{trip_id}/optimize")
+def optimize_trip_itinerary(trip_id: str, db: Session = Depends(get_db)):
+    """Replace proposed catalog selections with deterministic ranked selections."""
+    trip = _trip_or_404(db, trip_id)
+    items = ItineraryGenerator(db).optimize_for_trip(trip.id)
+    db.refresh(trip)
+    return {
+        "status": "success",
+        "trip_id": trip.id,
+        "items_count": len(items),
+        "trip": _trip_dict(trip),
+    }
+
+
 @router.post("/ai/replan")
 def ai_replan(payload: AIReplanRequest, db: Session = Depends(get_db)):
     """Dynamically adjust itinerary based on external disruption event."""

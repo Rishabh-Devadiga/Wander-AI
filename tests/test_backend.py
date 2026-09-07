@@ -1,8 +1,16 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database.connection import SessionLocal
-from backend.models.models import Destination, Trip, User, Hotel, Activity, TransportOption, Booking, ItineraryItem
+from backend.models.models import (
+    Activity, Alert, Booking, ChangeHistory, Destination, Hotel, ItineraryItem, TransportOption, Trip,
+    TripPreference, User,
+)
+from backend.itinerary.generator import ItineraryGenerator
+from backend.replanning.engine import ReplanningEngine
+from backend.recommendation.engine import RecommendationEngine
 from database.seed_data.seed import run_seed
 from backend.research.service import DestinationResearchService
 from backend.schemas.schemas import ResearchContext
@@ -156,6 +164,298 @@ def test_ai_foundation_endpoints():
     })
     assert replan_res.status_code == 200
     assert replan_res.json()["status"] == "success"
+
+
+def _replanning_test_trip():
+    db = SessionLocal()
+    user = db.query(User).first()
+    destination = db.query(Destination).filter(Destination.slug == "manali").first()
+    activity = db.query(Activity).filter(Activity.id == "act-manali-001").first()
+    trip = Trip(user_id=user.id, destination_id=destination.id, title="Catalog replan test", traveler_count=2)
+    db.add(trip)
+    db.flush()
+    item = ItineraryItem(
+        trip_id=trip.id, day_number=2, order_index=1, item_type="activity",
+        title=activity.title, description=activity.description, activity_id=activity.id,
+        location="Solang Valley", cost=activity.price_per_person * trip.traveler_count, status="confirmed",
+    )
+    db.add(item)
+    db.commit()
+    return db, trip, item
+
+
+def test_replanning_trip_not_found_does_not_create_alert():
+    db = SessionLocal()
+    before = db.query(Alert).count()
+    result = ReplanningEngine(db).handle_disruption("missing-trip", {"type": "weather_alert"})
+    assert result == {"status": "error", "message": "Trip not found"}
+    assert db.query(Alert).count() == before
+    db.close()
+
+
+def test_replanning_inspects_itinerary_creates_catalog_proposal_and_history():
+    db, trip, item = _replanning_test_trip()
+    result = ReplanningEngine(db).handle_disruption(trip.id, {
+        "type": "weather_alert", "severity": "warning", "title": "Heavy snowfall at Solang Valley",
+        "description": "Outdoor activity is unavailable", "alternative_id": "act-manali-003",
+    })
+
+    assert result["status"] == "success"
+    assert result["trip_id"] == trip.id
+    assert db.query(Alert).filter(Alert.id == result["alert_id"], Alert.trip_id == trip.id).one().is_resolved is False
+    plan = result["ai_replan_plan"]
+    assert plan["affected_items"][0]["id"] == item.id
+    assert plan["proposals"][0]["itinerary_item_id"] == item.id
+    alternative = plan["proposals"][0]["alternative"]
+    assert alternative["activity_id"] == "act-manali-003"
+    assert db.query(Activity).filter(
+        Activity.id == alternative["activity_id"], Activity.destination_id == trip.destination_id,
+        Activity.is_active == True,
+    ).one()
+    history = db.query(ChangeHistory).filter(
+        ChangeHistory.trip_id == trip.id, ChangeHistory.action == "replan_proposed",
+    ).one()
+    assert json.loads(history.old_value)["activity_id"] == "act-manali-001"
+    assert json.loads(history.new_value)["activity_id"] == "act-manali-003"
+    assert db.query(ItineraryItem).filter(ItineraryItem.id == item.id).one().activity_id == "act-manali-001"
+    db.close()
+
+
+def test_replanning_rejects_non_catalog_requested_alternative():
+    db, trip, item = _replanning_test_trip()
+    result = ReplanningEngine(db).handle_disruption(trip.id, {
+        "type": "weather_alert", "title": "Solang Valley weather disruption",
+        "alternative_id": "not-a-catalog-activity",
+    })
+
+    plan = result["ai_replan_plan"]
+    assert plan["rejected_alternative_id"] == "not-a-catalog-activity"
+    assert all(proposal["alternative"]["activity_id"] != "not-a-catalog-activity" for proposal in plan["proposals"])
+    assert item.id in {affected["id"] for affected in plan["affected_items"]}
+    db.close()
+
+
+def test_existing_replan_options_and_apply_routes_remain_available():
+    db, trip, _ = _replanning_test_trip()
+    trip_id = trip.id
+    db.close()
+
+    options = client.post(f"/api/trips/{trip_id}/ai-replan-options")
+    assert options.status_code == 200
+    assert any(candidate["id"] == "act-manali-003" for candidate in options.json()["candidates"])
+
+    applied = client.post(f"/api/trips/{trip_id}/apply-replan", json={"alternative_id": "act-manali-003"})
+    assert applied.status_code == 200
+    assert any(item["activity_id"] == "act-manali-003" for item in applied.json()["trip"]["itinerary"])
+
+
+def test_recommendation_engine_scores_destination_catalog_without_gemini(monkeypatch):
+    import backend.recommendation.engine as recommendation_engine
+
+    class UnavailableGemini:
+        def recommend(self, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(recommendation_engine, "gemini_service", UnavailableGemini())
+    db = SessionLocal()
+    try:
+        destination = db.query(Destination).filter(Destination.slug == "manali").one()
+        result = RecommendationEngine(db).get_recommendations(destination.id, {
+            "budget_tier": "budget",
+            "interests": ["culture"],
+            "accommodation_types": ["boutique"],
+            "transport_preferences": ["volvo_bus"],
+            "travel_companions": "couple",
+            "dietary_requirements": [],
+            "special_requests": "short",
+        })
+        assert result["ai_insights"]["status"] == "unavailable"
+        assert result["recommended_hotels"][0]["id"] == "htl-manali-002"
+        assert result["recommended_activities"][0]["id"] == "act-manali-004"
+        assert result["recommended_transport"][0]["id"] == "trn-manali-002"
+        for key in ("recommended_hotels", "recommended_activities", "recommended_transport"):
+            scores = [entry["match_score"] for entry in result[key]]
+            assert scores == sorted(scores, reverse=True)
+            assert all(isinstance(score, float) for score in scores)
+        active_ids = {
+            "recommended_hotels": {item.id for item in db.query(Hotel).filter(Hotel.destination_id == destination.id, Hotel.is_active == True)},
+            "recommended_activities": {item.id for item in db.query(Activity).filter(Activity.destination_id == destination.id, Activity.is_active == True)},
+            "recommended_transport": {item.id for item in db.query(TransportOption).filter(TransportOption.destination_id == destination.id, TransportOption.is_active == True)},
+        }
+        for key, ids in active_ids.items():
+            assert {entry["id"] for entry in result[key]} <= ids
+    finally:
+        db.close()
+
+
+def test_itinerary_generator_consumes_ranked_catalog_without_duplicates(monkeypatch):
+    import backend.itinerary.generator as itinerary_generator
+
+    class RankedEngine:
+        def __init__(self, db):
+            pass
+
+        def get_recommendations(self, destination_id, preferences):
+            assert destination_id == "dest-manali-001"
+            assert preferences["budget_tier"] == "budget"
+            return {
+                "ai_insights": None,
+                "recommended_hotels": [{"id": "htl-manali-002"}],
+                "recommended_activities": [
+                    {"id": "act-manali-004"},
+                    {"id": "act-manali-004"},
+                    {"id": "act-manali-003"},
+                    {"id": "act-manali-001"},
+                ],
+                "recommended_transport": [{"id": "trn-manali-002"}],
+            }
+
+    monkeypatch.setattr(itinerary_generator, "RecommendationEngine", RankedEngine)
+    db = SessionLocal()
+    trip = None
+    try:
+        trip = Trip(
+            user_id="usr-alex-morgan-001",
+            destination_id="dest-manali-001",
+            title="Ranked Generator Test",
+            duration_days=3,
+            total_budget=100000.0,
+            currency="INR",
+            traveler_count=3,
+        )
+        db.add(trip)
+        db.flush()
+        db.add(TripPreference(
+            trip_id=trip.id,
+            budget_tier="budget",
+            interests=["culture"],
+            travel_companions="friends",
+            accommodation_types=["boutique"],
+            transport_preferences=["volvo_bus"],
+            dietary_requirements=[],
+        ))
+        db.commit()
+
+        items = ItineraryGenerator(db).generate_for_trip(trip.id)
+        assert next(item for item in items if item.hotel_id).hotel_id == "htl-manali-002"
+        assert next(item for item in items if item.transport_id).transport_id == "trn-manali-002"
+        activities = [item for item in items if item.activity_id]
+        assert [item.activity_id for item in activities] == [
+            "act-manali-004", "act-manali-003", "act-manali-001",
+        ]
+        assert len({item.activity_id for item in activities}) == len(activities)
+        assert all(item.status == "proposed" for item in items)
+        hotel = db.query(Hotel).filter(Hotel.id == "htl-manali-002").one()
+        transport = db.query(TransportOption).filter(TransportOption.id == "trn-manali-002").one()
+        catalog_activities = {item.id: item for item in db.query(Activity).filter(Activity.id.in_([
+            "act-manali-004", "act-manali-003", "act-manali-001",
+        ])).all()}
+        assert next(item.cost for item in items if item.hotel_id) == hotel.price_per_night * 2
+        assert next(item.cost for item in items if item.transport_id) == transport.price
+        assert [item.cost for item in activities] == [
+            catalog_activities[item.activity_id].price_per_person * 3 for item in activities
+        ]
+
+        repeated = ItineraryGenerator(db).generate_for_trip(trip.id)
+        assert [item.id for item in repeated] == [item.id for item in items]
+        assert db.query(ItineraryItem).filter(ItineraryItem.trip_id == trip.id).count() == len(items)
+    finally:
+        if trip:
+            db.query(ItineraryItem).filter(ItineraryItem.trip_id == trip.id).delete()
+            db.query(TripPreference).filter(TripPreference.trip_id == trip.id).delete()
+            db.query(Trip).filter(Trip.id == trip.id).delete()
+            db.commit()
+        db.close()
+
+
+def test_trip_optimizer_rebuilds_proposed_items_from_ranked_catalog(monkeypatch):
+    import backend.itinerary.generator as itinerary_generator
+
+    class RankedEngine:
+        def __init__(self, db):
+            pass
+
+        def get_recommendations(self, destination_id, preferences):
+            assert destination_id == "dest-manali-001"
+            assert preferences["interests"] == ["culture"]
+            return {
+                "ai_insights": None,
+                "recommended_hotels": [{"id": "htl-manali-002"}],
+                "recommended_activities": [
+                    {"id": "act-manali-004"},
+                    {"id": "act-manali-003"},
+                    {"id": "act-manali-001"},
+                ],
+                "recommended_transport": [{"id": "trn-manali-002"}],
+            }
+
+    monkeypatch.setattr(itinerary_generator, "RecommendationEngine", RankedEngine)
+    db = SessionLocal()
+    trip = None
+    try:
+        trip = Trip(
+            user_id="usr-alex-morgan-001",
+            destination_id="dest-manali-001",
+            title="Optimizer Test",
+            duration_days=3,
+            total_budget=50000.0,
+            currency="INR",
+            traveler_count=2,
+            pace="relaxed",
+        )
+        db.add(trip)
+        db.flush()
+        db.add(TripPreference(
+            trip_id=trip.id,
+            budget_tier="budget",
+            interests=["culture"],
+            travel_companions="couple",
+            accommodation_types=["boutique"],
+            transport_preferences=["volvo_bus"],
+            dietary_requirements=[],
+        ))
+        db.add_all([
+            ItineraryItem(
+                trip_id=trip.id, day_number=1, order_index=1, item_type="hotel", title="Old hotel",
+                cost=37000.0, status="proposed", hotel_id="htl-manali-001",
+            ),
+            ItineraryItem(
+                trip_id=trip.id, day_number=1, order_index=2, item_type="activity", title="Duplicate",
+                cost=7000.0, status="proposed", activity_id="act-manali-001",
+            ),
+            ItineraryItem(
+                trip_id=trip.id, day_number=2, order_index=1, item_type="activity", title="Duplicate",
+                cost=7000.0, status="proposed", activity_id="act-manali-001",
+            ),
+        ])
+        db.commit()
+
+        response = client.post(f"/api/trips/{trip.id}/optimize")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["trip_id"] == trip.id
+        optimized = body["trip"]["itinerary"]
+        assert next(item for item in optimized if item["hotel_id"])["hotel_id"] == "htl-manali-002"
+        assert next(item for item in optimized if item["transport_id"])["transport_id"] == "trn-manali-002"
+        activity_ids = [item["activity_id"] for item in optimized if item["activity_id"]]
+        assert activity_ids == ["act-manali-004", "act-manali-003", "act-manali-001"]
+        assert len(activity_ids) == len(set(activity_ids))
+        assert sum(item["cost"] for item in optimized) <= 50000.0
+        assert all(item["day_number"] <= 3 for item in optimized)
+
+        repeated = client.post(f"/api/trips/{trip.id}/optimize")
+        assert repeated.status_code == 200
+        repeated_items = repeated.json()["trip"]["itinerary"]
+        assert [item["activity_id"] for item in repeated_items if item["activity_id"]] == activity_ids
+        assert len(repeated_items) == len(optimized)
+        assert "/api/trips/{trip_id}/optimize" in client.get("/openapi.json").json()["paths"]
+    finally:
+        if trip:
+            db.query(ItineraryItem).filter(ItineraryItem.trip_id == trip.id).delete()
+            db.query(TripPreference).filter(TripPreference.trip_id == trip.id).delete()
+            db.query(Trip).filter(Trip.id == trip.id).delete()
+            db.commit()
+        db.close()
 
 
 class _ResearchGemini:

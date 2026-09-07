@@ -735,6 +735,33 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-07 Replanning Engine Strengthening
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the existing replanning engine, FastAPI replan routes, request schema, Gemini replan helper, SQLAlchemy trip, itinerary, activity, alert, and change-history models, seeded catalog, and backend tests.
+
+Changed:
+
+- Reworked `backend/replanning/engine.py` in place. `POST /api/ai/replan` now loads the trip's active itinerary, identifies event-matched items (or weather/road-affected active activity and transport items), and returns catalog-backed activity replacement proposals for affected activities.
+- Alternatives are restricted to active activities for the trip destination with matching trip currency and positive duration. Existing selected activities are excluded from automatic selection. An optional requested `alternative_id` is only used when it satisfies those same checks; invalid IDs are reported as rejected and never enter a proposal.
+- Replan proposals remain non-mutating: the existing `/api/trips/{trip_id}/apply-replan` route remains the explicit itinerary-application path. Each proposal now records JSON snapshots of the actual existing itinerary item and selected catalog alternative in `ChangeHistory`; alerts continue to be created for every valid trip disruption.
+
+Files modified:
+
+- `backend/replanning/engine.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\replanning\\engine.py tests\\test_backend.py`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (47 passed, 43 warnings).
+
+Known remaining issues:
+
+- Replanning currently proposes activity replacements only; affected transport items are reported but no transport substitution is proposed by this engine.
+
 ### 2026-09-07 Python Environment and Pylance Import Repair
 
 Inspected:
@@ -1201,3 +1228,74 @@ Known remaining issues:
 - FastAPI local startup and Python tests could not run for the same reason.
 - Frontend lint/build could not complete because local Node dependencies are not installed and `tsc`/`vite` are unavailable.
 - `OPERATOR_LOGIN_PASSWORD` must be configured in the backend environment for `POST /api/auth/operator-login`.
+
+### 2026-09-07 Recommendation Engine Strengthening
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the existing recommendation engine, FastAPI route usage, Gemini recommendation helper, SQLAlchemy catalog models, seeded catalog, and backend tests.
+
+Changed:
+
+- Reworked `backend/recommendation/engine.py` in place. `RecommendationEngine.get_recommendations(destination_id, preferences)` continues to query only active catalog records and scopes all three catalog queries to `destination_id` when it is supplied.
+- Added deterministic hotel, activity, and transport scoring based on direct matches between the supplied preferences and catalog fields, catalog-relative budget suitability and price efficiency, rating where present, and catalog-relative duration efficiency where present. Scores have stable catalog-field tie breakers and each returned recommendation includes a numeric `match_score`.
+- Expanded recommendation serialization to retain the catalog fields for each returned hotel, activity, and transport option. Gemini remains an optional summary only; Gemini failures return an unavailable insight while the deterministic catalog ranking is still returned.
+
+Files modified:
+
+- `backend/recommendation/engine.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\recommendation\\engine.py`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (48 passed, 43 warnings).
+
+### 2026-09-07 Ranked Itinerary Generation
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the persisted itinerary generator, trip creation route, SQLAlchemy trip and itinerary models, recommendation engine, seeded catalog, and backend tests.
+
+Changed:
+
+- Reworked `backend/itinerary/generator.py` in place. `ItineraryGenerator.generate_for_trip(trip_id)` now loads the trip preferences and consumes the ranked hotel, activity, and transport candidates supplied by `RecommendationEngine` for the trip destination.
+- The generator re-fetches ranked IDs from the active, destination-scoped, currency-compatible catalog before persisting proposed itinerary items. It uses catalog titles, descriptions, locations, IDs, and model prices only; itinerary costs use hotel nightly price across trip nights, transport price, and activity price per person multiplied by the trip traveler count.
+- Repeated generation returns the trip's existing itinerary items without adding duplicates. New generation deduplicates activity IDs, stops when ranked activities are exhausted, and uses a ranked greedy budget guard without itinerary optimization or synthetic filler content.
+- Added a focused backend test covering ranked candidate consumption, catalog cost calculation, activity deduplication, and repeat-generation safety.
+
+Files modified:
+
+- `backend/itinerary/generator.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\itinerary\\generator.py`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (49 passed, 47 warnings).
+
+### 2026-09-07 Trip Optimization Layer
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, FastAPI routes, request and response schemas, SQLAlchemy trip and catalog models, the itinerary generator, recommendation engine, and backend tests.
+
+Changed:
+
+- Added `POST /api/trips/{trip_id}/optimize` in `backend/api/routes.py`. It derives all optimization inputs from the persisted trip, so no optimization request schema or database table was added.
+- Extended `backend/itinerary/generator.py` with `optimize_for_trip(trip_id)`, sharing its existing ranked-catalog construction path with `generate_for_trip`. The optimizer replaces only proposed catalog-backed itinerary items, preserving non-proposed items and reserving their cost and catalog IDs.
+- Optimization uses active, destination-scoped, currency-compatible candidates returned by `RecommendationEngine`; it excludes transport options below the trip traveler capacity, avoids duplicate activity IDs, bounds new selections by the remaining trip budget, limits activity slots by duration and pace, and leaves unfilled slots empty. It does not use Gemini for selection and does not perform route-distance or advanced mathematical optimization.
+- Added a focused endpoint test for ranked replacement, budget compliance, activity deduplication, repeat behavior, and OpenAPI registration.
+
+Files modified:
+
+- `backend/api/routes.py`
+- `backend/itinerary/generator.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\itinerary\\generator.py backend\\api\\routes.py`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (50 passed, 51 warnings).
