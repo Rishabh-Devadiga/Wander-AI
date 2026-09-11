@@ -199,6 +199,47 @@ Return this exact object shape:
                 logger.warning("Destination research model %s failed: %s", model, exc)
         raise RuntimeError("Gemini destination research failed") from last_error
 
+    def discover_destination_inventory(self, traveler_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Research unknown destinations and return sourced catalog candidates only."""
+        if not self.is_available() or not self.client:
+            raise RuntimeError("Gemini is unavailable")
+        prompt = f"""
+You are TourFlow AI's Research Agent for unknown travel destinations.
+Return ONLY valid JSON. Do not create an itinerary or a Trip.
+Every destination, hotel, attraction/activity, and transport candidate must include:
+- a real-world name
+- latitude and longitude from evidence you can cite
+- evidence with at least one public http(s) URL whose supports list includes "existence" and "coordinates"
+Do not include a candidate if you cannot cite evidence for its existence and coordinates.
+Do not invent hotel names, activity names, transport names, prices, or coordinates.
+Traveler request: {json.dumps(traveler_context)}
+Return this exact object shape:
+{{
+  "destination": {{"name":"string","country":"string","state_region":"string","description":"string","best_time_to_visit":"string|null","latitude":0.0,"longitude":0.0,"regions":["string"],"evidence":[{{"url":"https://...","label":"string","supports":["existence","coordinates"]}}]}},
+  "activities": [{{"name":"string","category":"culture|nature|adventure|culinary|relaxation","area":"string","description":"string","duration_hours":2.0,"price_per_person":0.0,"currency":"INR","difficulty_level":"easy|moderate|challenging","latitude":0.0,"longitude":0.0,"evidence":[{{"url":"https://...","label":"string","supports":["existence","coordinates"]}}]}}],
+  "hotels": [{{"name":"string","category":"luxury|boutique|mid-range|budget|homestay","address":"string","description":"string","price_per_night":0.0,"currency":"INR","rating":4.0,"latitude":0.0,"longitude":0.0,"evidence":[{{"url":"https://...","label":"string","supports":["existence","coordinates"]}}]}}],
+  "transport_options": [{{"name":"string","type":"private_cab|volvo_bus|flight|train|self_drive|boat","route_from":"string","route_to":"string","duration_hours":4.0,"price":0.0,"currency":"INR","capacity":4,"latitude":0.0,"longitude":0.0,"features":["string"],"evidence":[{{"url":"https://...","label":"string","supports":["existence","coordinates"]}}]}}],
+  "travel_considerations":["string"],
+  "seasonal_considerations":["string"],
+  "source":"gemini_research"
+}}
+"""
+        last_error = None
+        for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]:
+            try:
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json", "temperature": 0.1},
+                )
+                text = (response.text or "").strip()
+                if text:
+                    return json.loads(text)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Destination inventory research model %s failed: %s", model, exc)
+        raise RuntimeError("Gemini destination inventory research failed") from last_error
+
     def generate_full_trip_plan(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate a complete structured trip plan strictly adhering to the TourFlow AI schema:

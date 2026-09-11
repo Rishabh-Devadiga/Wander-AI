@@ -8,6 +8,10 @@ from backend.models.models import Activity, Hotel, ItineraryItem, TransportOptio
 from backend.recommendation.engine import RecommendationEngine
 
 
+class ItineraryGenerationError(Exception):
+    """Raised when a trip itinerary cannot be generated from verified catalog records."""
+
+
 class ItineraryGenerator:
     """Build proposed itinerary items from deterministic catalog recommendations."""
 
@@ -17,7 +21,7 @@ class ItineraryGenerator:
     def generate_for_trip(self, trip_id: str) -> List[ItineraryItem]:
         trip = self.db.query(Trip).filter(Trip.id == trip_id).first()
         if not trip:
-            return []
+            raise ItineraryGenerationError("Trip not found")
         existing_items = self._trip_items(trip)
         if existing_items:
             return existing_items
@@ -27,7 +31,7 @@ class ItineraryGenerator:
         """Replace proposed catalog selections with a budget-bounded ranked selection."""
         trip = self.db.query(Trip).filter(Trip.id == trip_id).first()
         if not trip:
-            return []
+            raise ItineraryGenerationError("Trip not found")
 
         existing_items = self._trip_items(trip)
         replaceable = [
@@ -53,7 +57,7 @@ class ItineraryGenerator:
     ) -> List[ItineraryItem]:
         new_items = self._ranked_items(trip, preserved_items)
         if not new_items:
-            return []
+            raise ItineraryGenerationError("No catalog-backed itinerary items could be generated")
         self.db.add_all(new_items)
         if commit:
             self.db.commit()
@@ -65,11 +69,12 @@ class ItineraryGenerator:
         preserved_items: Sequence[ItineraryItem],
     ) -> List[ItineraryItem]:
         if not trip.destination_id or not trip.destination:
-            return []
+            raise ItineraryGenerationError("Trip must reference a valid catalog destination")
 
         recommendations = RecommendationEngine(self.db).get_recommendations(
             trip.destination_id,
             self._preferences(trip),
+            discovery_session_id=trip.discovery_session_id,
         )
         hotels = self._ranked_catalog(Hotel, recommendations["recommended_hotels"], trip)
         activities = self._ranked_catalog(Activity, recommendations["recommended_activities"], trip)
@@ -92,11 +97,15 @@ class ItineraryGenerator:
         hotel_nights = max(1, duration_days - 1)
         hotel = None
         if not preserved_hotel_ids:
+            if not hotels:
+                raise ItineraryGenerationError("No active catalog hotel is available for this destination and currency")
             hotel = self._first_within_budget(
                 hotels,
                 lambda candidate: float(candidate.price_per_night or 0) * hotel_nights,
                 remaining_budget,
             )
+            if not hotel:
+                raise ItineraryGenerationError("No active catalog hotel fits the trip budget")
             if hotel:
                 remaining_budget = self._subtract_budget(
                     remaining_budget,
@@ -105,26 +114,36 @@ class ItineraryGenerator:
 
         transport = None
         if not preserved_transport_ids:
+            if not transport_options:
+                raise ItineraryGenerationError("No active catalog transport option is available for this destination, currency, and traveler count")
             transport = self._first_within_budget(
                 transport_options,
                 lambda candidate: float(candidate.price or 0),
                 remaining_budget,
             )
+            if not transport:
+                raise ItineraryGenerationError("No active catalog transport option fits the trip budget")
             if transport:
                 remaining_budget = self._subtract_budget(remaining_budget, float(transport.price or 0))
 
         activity_slots = max(0, self._activity_slots(duration_days, trip.pace) - len(preserved_activity_ids))
+        required_activity_days = max(0, duration_days - 1 - len(preserved_activity_ids))
+        if activity_slots > 0 and not activities:
+            raise ItineraryGenerationError("No active catalog activities are available for this destination and currency")
         selected_activities = []
         selected_activity_ids = set(preserved_activity_ids)
         for activity in activities:
             if len(selected_activities) >= activity_slots or activity.id in selected_activity_ids:
                 continue
             cost = float(activity.price_per_person or 0) * traveler_count
-            if remaining_budget is not None and cost > remaining_budget:
+            needs_activity_for_duration = len(selected_activities) < required_activity_days
+            if remaining_budget is not None and cost > remaining_budget and not needs_activity_for_duration:
                 continue
             selected_activities.append(activity)
             selected_activity_ids.add(activity.id)
             remaining_budget = self._subtract_budget(remaining_budget, cost)
+        if len(selected_activities) < required_activity_days:
+            raise ItineraryGenerationError("Not enough distinct active catalog activities fit the requested duration and budget")
 
         occupied_orders = {(item.day_number, item.order_index) for item in preserved_items}
         new_items: List[ItineraryItem] = []
@@ -143,6 +162,7 @@ class ItineraryGenerator:
                     status="proposed",
                     transport_id=transport.id,
                     location=transport.route_to,
+                    meta_data={"ui": self._entity_ui_meta(transport)},
                 )
             )
 
@@ -161,6 +181,7 @@ class ItineraryGenerator:
                     status="proposed",
                     hotel_id=hotel.id,
                     location=hotel.address or hotel.name,
+                    meta_data={"ui": self._entity_ui_meta(hotel)},
                 )
             )
 
@@ -180,6 +201,7 @@ class ItineraryGenerator:
                     status="proposed",
                     activity_id=activity.id,
                     location=activity.meeting_point or trip.destination.name,
+                    meta_data={"ui": self._entity_ui_meta(activity)},
                 )
             )
         return new_items
@@ -222,9 +244,22 @@ class ItineraryGenerator:
             model.destination_id == trip.destination_id,
             model.is_active.is_(True),
         )
+        if trip.discovery_session_id:
+            query = query.filter(
+                model.inventory_source == "discovered",
+                model.discovery_session_id == trip.discovery_session_id,
+                model.verification_status == "verified_candidate",
+            )
+        else:
+            query = query.filter(model.inventory_source == "catalog")
         if trip.currency:
             query = query.filter(model.currency == trip.currency)
         catalog_by_id = {item.id: item for item in query.all()}
+        missing_ids = sorted({item_id for item_id in ranked_ids if item_id not in catalog_by_id})
+        if missing_ids:
+            raise ItineraryGenerationError(
+                f"Recommendation selected invalid catalog IDs for {model.__name__}: {', '.join(missing_ids)}"
+            )
         return [catalog_by_id[item_id] for item_id in ranked_ids if item_id in catalog_by_id]
 
     @staticmethod
@@ -279,6 +314,16 @@ class ItineraryGenerator:
         if transport.route_from and transport.route_to:
             return f"{transport.route_from} to {transport.route_to}"
         return None
+
+    @staticmethod
+    def _entity_ui_meta(entity: Any) -> Dict[str, Any]:
+        meta = {
+            "latitude": getattr(entity, "latitude", None),
+            "longitude": getattr(entity, "longitude", None),
+            "source_url": getattr(entity, "source_url", None),
+            "evidence": getattr(entity, "evidence", None) or [],
+        }
+        return {key: value for key, value in meta.items() if value not in (None, [], "")}
 
     @staticmethod
     def _activity_slot(index: int) -> tuple[int, int, str]:

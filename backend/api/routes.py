@@ -30,7 +30,8 @@ from backend.booking.service import (
 )
 from backend.assistant.service import AssistantExecutionError, AssistantService, AssistantValidationError
 from backend.recommendation.engine import RecommendationEngine
-from backend.itinerary.generator import ItineraryGenerator
+from backend.dynamic_destination.service import DynamicDestinationDiscoveryError, DynamicDestinationDiscoveryService
+from backend.itinerary.generator import ItineraryGenerationError, ItineraryGenerator
 from backend.replanning.engine import ReplanningEngine
 import os
 import secrets
@@ -43,6 +44,114 @@ def _trip_or_404(db: Session, trip_id: str) -> Trip:
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
     return trip
+
+
+def _resolve_catalog_destination(db: Session, trip_in: TripCreate) -> Destination:
+    destination = _find_catalog_destination(db, trip_in)
+    if not destination:
+        raise HTTPException(status_code=422, detail="A valid catalog destination is required")
+    return destination
+
+
+def _find_catalog_destination(db: Session, trip_in: TripCreate) -> Optional[Destination]:
+    destination_id = trip_in.destination_id
+    destination_name = trip_in.destination_name
+    if isinstance(trip_in.destination, str):
+        destination_name = destination_name or trip_in.destination
+    elif isinstance(trip_in.destination, dict):
+        destination_id = destination_id or trip_in.destination.get("id")
+        destination_name = destination_name or trip_in.destination.get("name")
+
+    destination = None
+    if destination_id:
+        destination = db.query(Destination).filter(
+            Destination.id == destination_id,
+            Destination.inventory_source == "catalog",
+        ).first()
+    if not destination and destination_name:
+        clean_name = destination_name.strip()
+        destination = db.query(Destination).filter(
+            ((Destination.name.ilike(clean_name)) | (Destination.slug.ilike(clean_name))),
+            Destination.inventory_source == "catalog",
+        ).first()
+    return destination
+
+
+def _requested_destination_name(trip_in: TripCreate) -> Optional[str]:
+    if trip_in.destination_name:
+        return trip_in.destination_name.strip()
+    if isinstance(trip_in.destination, str):
+        return trip_in.destination.strip()
+    if isinstance(trip_in.destination, dict) and trip_in.destination.get("name"):
+        return str(trip_in.destination["name"]).strip()
+    return None
+
+
+def _resolve_or_discover_destination(db: Session, trip_in: TripCreate) -> Destination:
+    destination = _find_catalog_destination(db, trip_in)
+    if destination:
+        return destination
+    if trip_in.destination_id and not _requested_destination_name(trip_in):
+        raise HTTPException(status_code=422, detail="A valid catalog destination is required")
+    destination_name = _requested_destination_name(trip_in)
+    if not destination_name:
+        raise HTTPException(status_code=422, detail="A valid destination name is required")
+    try:
+        return DynamicDestinationDiscoveryService(db, gemini_service).discover_and_persist(
+            trip_in, destination_name, secrets.token_hex(16)
+        )
+    except DynamicDestinationDiscoveryError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=f"Destination research could not be verified: {exc}") from exc
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=f"Destination research is unavailable: {exc}") from exc
+
+
+def _validate_generation_inventory(db: Session, destination: Destination, currency: str, traveler_count: int, duration_days: int) -> None:
+    currency = (currency or "INR").upper()
+    hotel_filters = [
+        Hotel.destination_id == destination.id,
+        Hotel.currency == currency,
+        Hotel.is_active == True,
+    ]
+    transport_filters = [
+        TransportOption.destination_id == destination.id,
+        TransportOption.currency == currency,
+        TransportOption.capacity >= max(1, traveler_count),
+        TransportOption.is_active == True,
+    ]
+    activity_filters = [
+        Activity.destination_id == destination.id,
+        Activity.currency == currency,
+        Activity.is_active == True,
+    ]
+    if destination.inventory_source == "discovered":
+        scoped_filters = [
+            ("discovery_session_id", destination.discovery_session_id),
+            ("verification_status", "verified_candidate"),
+            ("inventory_source", "discovered"),
+        ]
+        for field, value in scoped_filters:
+            hotel_filters.append(getattr(Hotel, field) == value)
+            transport_filters.append(getattr(TransportOption, field) == value)
+            activity_filters.append(getattr(Activity, field) == value)
+    hotel_count = db.query(Hotel).filter(*hotel_filters).count()
+    transport_count = db.query(TransportOption).filter(*transport_filters).count()
+    activity_count = db.query(Activity).filter(*activity_filters).count()
+    required_activities = max(0, max(1, duration_days) - 1)
+    missing = []
+    if hotel_count == 0:
+        missing.append("hotels")
+    if transport_count == 0:
+        missing.append("transport options")
+    if activity_count < required_activities:
+        missing.append(f"at least {required_activities} distinct activities")
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Catalog inventory for {destination.name} is incomplete: missing {', '.join(missing)}",
+        )
 
 
 def _record_change(db: Session, trip: Trip, action: str, field: str, value: str, reason: str, by: str = "user") -> None:
@@ -70,11 +179,17 @@ def _trip_dict(trip: Trip) -> Dict[str, Any]:
             "title": trip.title, "status": trip.status, "start_date": trip.start_date.isoformat() if trip.start_date else None,
             "end_date": trip.end_date.isoformat() if trip.end_date else None, "duration_days": trip.duration_days,
             "total_budget": trip.total_budget, "currency": trip.currency, "traveler_count": trip.traveler_count,
-            "pace": trip.pace, "created_at": trip.created_at.isoformat(), "updated_at": trip.updated_at.isoformat(),
+            "pace": trip.pace, "discovery_session_id": trip.discovery_session_id,
+            "created_at": trip.created_at.isoformat(), "updated_at": trip.updated_at.isoformat(),
             "destination": {"id": trip.destination.id, "name": trip.destination.name, "slug": trip.destination.slug,
                             "country": trip.destination.country, "state_region": trip.destination.state_region,
                             "description": trip.destination.description, "hero_image_url": trip.destination.hero_image_url,
                             "best_time_to_visit": trip.destination.best_time_to_visit, "tags": trip.destination.tags or [],
+                            "latitude": trip.destination.latitude, "longitude": trip.destination.longitude,
+                            "source_url": trip.destination.source_url, "evidence": trip.destination.evidence or [],
+                            "inventory_source": trip.destination.inventory_source,
+                            "verification_status": trip.destination.verification_status,
+                            "discovery_session_id": trip.destination.discovery_session_id,
                             "is_featured": trip.destination.is_featured, "created_at": trip.destination.created_at.isoformat()} if trip.destination else None,
             "itinerary": itinerary, "bookings": bookings,
             "preferences": {"id": trip.preferences.id, "trip_id": trip.preferences.trip_id,
@@ -242,35 +357,26 @@ def create_trip(trip_in: TripCreate, db: Session = Depends(get_db)):
 
     # 2. Resolve the planner's destination name/embedded destination to the
     # persisted catalog rather than accepting a disconnected frontend object.
-    destination_id = trip_in.destination_id
-    if not destination_id:
-        destination_name = trip_in.destination_name
-        if isinstance(trip_in.destination, str):
-            destination_name = destination_name or trip_in.destination
-        elif isinstance(trip_in.destination, dict):
-            destination_id = trip_in.destination.get("id")
-            destination_name = destination_name or trip_in.destination.get("name")
-        if not destination_id and destination_name:
-            destination = db.query(Destination).filter(
-                (Destination.name.ilike(destination_name)) | (Destination.slug.ilike(destination_name))
-            ).first()
-            destination_id = destination.id if destination else None
-    if not destination_id:
-        raise HTTPException(status_code=422, detail="A valid destination_id or catalog destination_name is required")
+    destination = _resolve_or_discover_destination(db, trip_in)
+    duration_days = trip_in.duration_days or 4
+    currency = trip_in.currency or "INR"
+    traveler_count = trip_in.traveler_count or 2
+    _validate_generation_inventory(db, destination, currency, traveler_count, duration_days)
 
     # 3. Create Trip entity
     trip = Trip(
         user_id=user_id,
-        destination_id=destination_id,
+        destination_id=destination.id,
         title=trip_in.title,
         status=trip_in.status or "planning",
         start_date=trip_in.start_date,
         end_date=trip_in.end_date,
-        duration_days=trip_in.duration_days or 4,
+        duration_days=duration_days,
         total_budget=trip_in.total_budget or 50000.0,
-        currency=trip_in.currency or "INR",
-        traveler_count=trip_in.traveler_count or 2,
-        pace=trip_in.pace or "balanced"
+        currency=currency,
+        traveler_count=traveler_count,
+        pace=trip_in.pace or "balanced",
+        discovery_session_id=destination.discovery_session_id if destination.inventory_source == "discovered" else None
     )
     db.add(trip)
     db.commit()
@@ -314,7 +420,17 @@ def create_trip(trip_in: TripCreate, db: Session = Depends(get_db)):
 
     # 6. Generate initial itinerary items
     generator = ItineraryGenerator(db)
-    generator.generate_for_trip(trip.id)
+    try:
+        generator.generate_for_trip(trip.id)
+    except ItineraryGenerationError as exc:
+        db.rollback()
+        db.query(ChangeHistory).filter(ChangeHistory.trip_id == trip.id).delete()
+        db.query(Notification).filter(Notification.trip_id == trip.id).delete()
+        db.query(TripPreference).filter(TripPreference.trip_id == trip.id).delete()
+        db.query(ItineraryItem).filter(ItineraryItem.trip_id == trip.id).delete()
+        db.query(Trip).filter(Trip.id == trip.id).delete()
+        db.commit()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     db.refresh(trip)
     return _trip_dict(trip)
@@ -589,7 +705,10 @@ def ai_generate_itinerary(payload: AIGenerateItineraryRequest, db: Session = Dep
     """Generate dynamic day-by-day itinerary schema."""
     if payload.trip_id:
         generator = ItineraryGenerator(db)
-        items = generator.generate_for_trip(payload.trip_id)
+        try:
+            items = generator.generate_for_trip(payload.trip_id)
+        except ItineraryGenerationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         trip = db.query(Trip).filter(Trip.id == payload.trip_id).first()
         return {
             "status": "success",
@@ -597,16 +716,17 @@ def ai_generate_itinerary(payload: AIGenerateItineraryRequest, db: Session = Dep
             "items_count": len(items),
             "trip": trip
         }
-    return gemini_service.generate_itinerary(
-        prompt_or_prefs=payload.preferences
-    )
+    raise HTTPException(status_code=422, detail="trip_id is required for catalog-grounded itinerary generation")
 
 
 @router.post("/trips/{trip_id}/optimize")
 def optimize_trip_itinerary(trip_id: str, db: Session = Depends(get_db)):
     """Replace proposed catalog selections with deterministic ranked selections."""
     trip = _trip_or_404(db, trip_id)
-    items = ItineraryGenerator(db).optimize_for_trip(trip.id)
+    try:
+        items = ItineraryGenerator(db).optimize_for_trip(trip.id)
+    except ItineraryGenerationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     db.refresh(trip)
     return {
         "status": "success",

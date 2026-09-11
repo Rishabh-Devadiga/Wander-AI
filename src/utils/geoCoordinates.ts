@@ -434,8 +434,11 @@ export function resolveCoordinates(
   if (destinationName) {
     const destKey = destinationName.toLowerCase().trim();
     const destData = CANONICAL_COORDINATES[destKey];
-    const baseLat = destData ? destData.lat : 27.0410;
-    const baseLng = destData ? destData.lng : 88.2663;
+    if (!destData) {
+      return { lat: 20.5937, lng: 78.9629, isEstimated: true };
+    }
+    const baseLat = destData.lat;
+    const baseLng = destData.lng;
 
     // Deterministic hash based on name characters so marker doesn't jump randomly on re-renders
     let hash = 0;
@@ -458,7 +461,24 @@ export function resolveCoordinates(
   }
 
   // 5. Default fallback
-  return { lat: 27.0410, lng: 88.2663 };
+  return { lat: 20.5937, lng: 78.9629, isEstimated: true };
+}
+
+function hasValidCoordinates(value: any): boolean {
+  const lat = Number(value?.latitude);
+  const lng = Number(value?.longitude);
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+}
+
+function coordinatesFromEntity(value: any): { lat: number; lng: number } | null {
+  if (hasValidCoordinates(value)) {
+    return { lat: Number(value.latitude), lng: Number(value.longitude) };
+  }
+  const ui = value?.meta_data?.ui;
+  if (hasValidCoordinates(ui)) {
+    return { lat: Number(ui.latitude), lng: Number(ui.longitude) };
+  }
+  return null;
 }
 
 // Generate intermediate curved arc coordinates for flight paths (great circle simulation)
@@ -510,14 +530,12 @@ export function extractTripMapData(trip: any): {
 } {
   const points: GeoLocationPoint[] = [];
   const routes: GeoRouteSegment[] = [];
-  const destName = trip.destination?.name || 'Darjeeling';
+  const destName = trip.destination?.name || 'Destination';
   const destSlug = trip.destination?.slug || destName.toLowerCase();
   const originName = trip.origin || 'Mumbai';
 
   // 1. Destination Main Point
-  const destCoords = trip.destination?.latitude && trip.destination?.longitude
-    ? { lat: trip.destination.latitude, lng: trip.destination.longitude }
-    : resolveCoordinates(destName);
+  const destCoords = coordinatesFromEntity(trip.destination) || resolveCoordinates(destName);
 
   points.push({
     id: 'point-destination',
@@ -609,9 +627,10 @@ export function extractTripMapData(trip: any): {
   let primaryHotelPoint: GeoLocationPoint | null = null;
 
   uniqueHotels.forEach(({ hotel, dayNumbers }, hId) => {
-    const hotelCoords = hotel.latitude && hotel.longitude
-      ? { lat: hotel.latitude, lng: hotel.longitude }
-      : resolveCoordinates(hotel.name, destName, 1);
+    const hotelCoords = coordinatesFromEntity(hotel);
+    if (!hotelCoords) {
+      return;
+    }
 
     const minDay = Math.min(...dayNumbers);
     const maxDay = Math.max(...dayNumbers);
@@ -698,9 +717,10 @@ export function extractTripMapData(trip: any): {
       dayGroups[day].push(item);
 
       // Resolve coordinates for each item
-      const itemCoords = item.latitude && item.longitude
-        ? { lat: item.latitude, lng: item.longitude }
-        : resolveCoordinates(item.title, destName, idx + 2);
+      const itemCoords = coordinatesFromEntity(item);
+      if (!itemCoords) {
+        return;
+      }
 
       points.push({
         id: `point-activity-${item.id || idx}`,
