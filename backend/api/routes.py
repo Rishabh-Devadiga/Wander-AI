@@ -15,7 +15,9 @@ from backend.schemas.schemas import (
     AccommodationContext, AccommodationResult, TransportationContext, TransportationResult,
     ExperienceContext, ExperienceResult, ItineraryContext, ItineraryResult,
     TripManagementContext, TripManagementResult, BookingRecommendationContext,
-    BookingRecommendationResult, AssistantChatContext, AssistantChatResult
+    BookingRecommendationResult, AssistantChatContext, AssistantChatResult,
+    SerpApiHotelResult, HotelSearchResponse, SelectHotelRequest,
+    LivePlace, PlacesLiveResponse
 )
 from backend.ai.gemini_service import gemini_service
 from backend.research.service import DestinationResearchService, ResearchExecutionError
@@ -29,6 +31,8 @@ from backend.booking.service import (
     BookingRecommendationValidationError,
 )
 from backend.assistant.service import AssistantExecutionError, AssistantService, AssistantValidationError
+from backend.database.config import settings
+from backend.hotels.service import SerpApiError, search_serpapi_hotels
 from backend.recommendation.engine import RecommendationEngine
 from backend.itinerary.generator import ItineraryGenerator
 from backend.replanning.engine import ReplanningEngine
@@ -50,8 +54,35 @@ def _record_change(db: Session, trip: Trip, action: str, field: str, value: str,
                          field_changed=field, new_value=value, reason=reason))
 
 
-def _trip_dict(trip: Trip) -> Dict[str, Any]:
-    """Serialize the persisted trip plus UI-derived selection fields."""
+def _hotel_option(hotel: Hotel, trip: Trip, badge: str) -> Dict[str, Any]:
+    """Build a frontend AccommodationOption-shaped dict from a catalog Hotel row.
+
+    Pricing follows the traveler-facing rules (rooms = ceil(travelers / 2),
+    nights = max(1, duration_days - 1)). The catalog stores no review counts,
+    so review_count is 0 rather than an invented value.
+    """
+    travelers = trip.traveler_count or 2
+    nights = max(1, (trip.duration_days or 2) - 1)
+    rooms = max(1, -(-travelers // 2))
+    price_per_night = float(hotel.price_per_night or 0) * rooms
+    images = hotel.images or []
+    dest_name = trip.destination.name if trip.destination else ""
+    return {"id": hotel.id, "name": hotel.name, "rating": hotel.rating, "review_count": 0,
+            "category": hotel.category, "location": hotel.address or dest_name,
+            "room_type": f"{rooms}x {hotel.category.title()} Room ({travelers} Guests)",
+            "price_per_night": price_per_night, "total_price": price_per_night * nights,
+            "nights": nights, "amenities": hotel.amenities or [],
+            "why_it_matches": f"Verified catalog {hotel.category} stay in {dest_name} rated {hotel.rating}.",
+            "hero_image": images[0] if images else None, "images": images, "badge": badge}
+
+
+def _trip_dict(trip: Trip, db: Session) -> Dict[str, Any]:
+    """Serialize the persisted trip plus UI-derived selection fields.
+
+    Hotel selection fields are derived from canonical data only: the trip's
+    hotel itinerary items joined to active catalog Hotel rows. No selection
+    is fabricated when the trip has no usable hotel item (selected is None).
+    """
     itinerary = []
     for item in trip.itinerary:
         row = {"id": item.id, "trip_id": item.trip_id, "day_number": item.day_number,
@@ -66,6 +97,32 @@ def _trip_dict(trip: Trip) -> Dict[str, Any]:
                  "booking_reference": b.booking_reference, "item_type": b.item_type, "item_id": b.item_id,
                  "amount": b.amount, "currency": b.currency, "status": b.status,
                  "payment_status": b.payment_status, "booking_date": b.booking_date.isoformat()} for b in trip.bookings]
+    hotel_items = sorted(
+        [i for i in trip.itinerary if i.item_type == "hotel" and i.hotel is not None and i.hotel.is_active],
+        key=lambda i: (i.day_number, i.order_index),
+    )
+    selected_accommodation = _hotel_option(hotel_items[0].hotel, trip, "best_match") if hotel_items else None
+    selected_id = hotel_items[0].hotel.id if hotel_items else None
+    alternatives: List[Dict[str, Any]] = []
+    if trip.destination_id:
+        query = db.query(Hotel).filter(Hotel.destination_id == trip.destination_id, Hotel.is_active == True)
+        if selected_id:
+            query = query.filter(Hotel.id != selected_id)
+        candidates = query.order_by(Hotel.rating.desc(), Hotel.price_per_night.asc()).limit(4).all()
+        cheapest_id = min(candidates, key=lambda h: h.price_per_night).id if candidates else None
+        top_rated_id = candidates[0].id if candidates else None
+        for hotel in candidates:
+            if hotel.id == cheapest_id:
+                badge = "cheapest"
+            elif hotel.id == top_rated_id:
+                badge = "best_rated"
+            elif hotel.category == "luxury":
+                badge = "luxury"
+            else:
+                badge = "best_match"
+            alternatives.append(_hotel_option(hotel, trip, badge))
+    daily_accommodations = [{"day_number": item.day_number, "hotel": _hotel_option(item.hotel, trip, "best_match")}
+                            for item in hotel_items]
     return {"id": trip.id, "user_id": trip.user_id, "destination_id": trip.destination_id,
             "title": trip.title, "status": trip.status, "start_date": trip.start_date.isoformat() if trip.start_date else None,
             "end_date": trip.end_date.isoformat() if trip.end_date else None, "duration_days": trip.duration_days,
@@ -77,6 +134,9 @@ def _trip_dict(trip: Trip) -> Dict[str, Any]:
                             "best_time_to_visit": trip.destination.best_time_to_visit, "tags": trip.destination.tags or [],
                             "is_featured": trip.destination.is_featured, "created_at": trip.destination.created_at.isoformat()} if trip.destination else None,
             "itinerary": itinerary, "bookings": bookings,
+            "selected_accommodation": selected_accommodation,
+            "accommodation_alternatives": alternatives,
+            "daily_accommodations": daily_accommodations,
             "preferences": {"id": trip.preferences.id, "trip_id": trip.preferences.trip_id,
                             "budget_tier": trip.preferences.budget_tier, "interests": trip.preferences.interests or [],
                             "travel_companions": trip.preferences.travel_companions,
@@ -181,6 +241,70 @@ def get_hotels(
     if category:
         query = query.filter(Hotel.category == category)
     return query.order_by(Hotel.rating.desc()).all()
+
+@router.get("/hotels/search", response_model=HotelSearchResponse)
+def search_hotels_live(
+    destination: str = Query(min_length=1, max_length=255),
+    check_in_date: str = Query(min_length=8, max_length=10),
+    check_out_date: str = Query(min_length=8, max_length=10),
+    adults: int = Query(default=2, ge=1, le=16),
+    children: int = Query(default=0, ge=0, le=10),
+    currency: str = Query(default="INR", min_length=3, max_length=10),
+    gl: str = Query(default="in", min_length=2, max_length=5),
+    hl: str = Query(default="en", min_length=2, max_length=10),
+    min_price: Optional[float] = Query(default=None, ge=0),
+    max_price: Optional[float] = Query(default=None, ge=0),
+    min_rating: Optional[float] = Query(default=None, ge=0, le=5),
+):
+    """Live hotel search via SerpApi Google Hotels (backend key, normalized)."""
+    from backend.hotels.service import validate_search_dates
+    api_key = (settings.SERPAPI_API_KEY or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Hotel search provider is not configured")
+    try:
+        validate_search_dates(check_in_date, check_out_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        results = search_serpapi_hotels(
+            api_key, settings.SERPAPI_BASE_URL, destination=destination,
+            check_in_date=check_in_date.strip(), check_out_date=check_out_date.strip(),
+            adults=adults, children=children, currency=currency, gl=gl, hl=hl,
+            min_price=min_price, max_price=max_price, min_rating=min_rating,
+            timeout_s=settings.SERPAPI_TIMEOUT_S, max_results=settings.SERPAPI_MAX_RESULTS,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SerpApiError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"destination": destination.strip(), "check_in_date": check_in_date.strip(),
+            "check_out_date": check_out_date.strip(), "currency": currency.upper(),
+            "results": [SerpApiHotelResult(**item) for item in results], "source": "serpapi"}
+
+@router.get("/places/live", response_model=PlacesLiveResponse)
+def places_live(destination: str = Query(min_length=1, max_length=255),
+                limit: int = Query(default=12, ge=1, le=30),
+                db: Session = Depends(get_db)):
+    """Live places/attractions with provider-backed images (keyless providers).
+
+    Catalog coordinates are preferred; unknown destinations are geocoded.
+    Always 200 (possibly empty) -- never fabricated.
+    """
+    from backend.places.service import get_live_places
+    dest = db.query(Destination).filter(
+        (Destination.name.ilike(destination.strip())) | (Destination.slug.ilike(destination.strip()))
+    ).first()
+    result = get_live_places(
+        destination.strip(),
+        dest.latitude if dest else None, dest.longitude if dest else None, limit,
+        settings.NOMINATIM_API_URL, settings.OVERPASS_API_URL, settings.COMMONS_API_URL,
+        settings.PLACES_TIMEOUT_S, settings.PLACES_RADIUS_M,
+    )
+    return {"destination": result["destination"], "latitude": result["latitude"],
+            "longitude": result["longitude"],
+            "places": [LivePlace(**place) for place in result["places"]],
+            "source": result["source"]}
+
 
 # ----------------------------------------------------
 # Activities API
@@ -317,7 +441,7 @@ def create_trip(trip_in: TripCreate, db: Session = Depends(get_db)):
     generator.generate_for_trip(trip.id)
 
     db.refresh(trip)
-    return _trip_dict(trip)
+    return _trip_dict(trip, db)
 
 @router.get("/trips/{trip_id}")
 def get_trip(trip_id: str, db: Session = Depends(get_db)):
@@ -328,7 +452,7 @@ def get_trip(trip_id: str, db: Session = Depends(get_db)):
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
-    return _trip_dict(trip)
+    return _trip_dict(trip, db)
 
 @router.put("/trips/{trip_id}")
 def update_trip(trip_id: str, trip_in: TripUpdate, db: Session = Depends(get_db)):
@@ -355,7 +479,7 @@ def update_trip(trip_id: str, trip_in: TripUpdate, db: Session = Depends(get_db)
 
     db.commit()
     db.refresh(trip)
-    return _trip_dict(trip)
+    return _trip_dict(trip, db)
 
 @router.get("/trips/{trip_id}/preferences", response_model=TripPreferenceRead)
 def get_trip_preferences(trip_id: str, db: Session = Depends(get_db)):
@@ -612,7 +736,7 @@ def optimize_trip_itinerary(trip_id: str, db: Session = Depends(get_db)):
         "status": "success",
         "trip_id": trip.id,
         "items_count": len(items),
-        "trip": _trip_dict(trip),
+        "trip": _trip_dict(trip, db),
     }
 
 
@@ -641,7 +765,7 @@ def list_trips(status: Optional[str] = None, search: Optional[str] = None,
         query = query.filter((Trip.title.ilike(like)) | (Trip.id.ilike(like)))
     # The persisted schema has no operator assignment. Keep this query accepted
     # for client compatibility, but never fabricate an assignment.
-    return [_trip_dict(t) for t in query.order_by(Trip.updated_at.desc()).all()]
+    return [_trip_dict(t, db) for t in query.order_by(Trip.updated_at.desc()).all()]
 
 
 @router.delete("/trips/{trip_id}")
@@ -661,7 +785,7 @@ def trigger_disruption(trip_id: str, db: Session = Depends(get_db)):
     db.add(alert)
     _record_change(db, trip, "disruption_triggered", "alerts", alert.title, alert.description, "operator")
     db.commit(); db.refresh(trip)
-    return {"success": True, "trip": _trip_dict(trip)}
+    return {"success": True, "trip": _trip_dict(trip, db)}
 
 
 @router.post("/trips/{trip_id}/impact-analysis")
@@ -715,7 +839,7 @@ def apply_replan(trip_id: str, payload: Dict[str, Any] = Body(default={}), db: S
                         message=f"Your itinerary has been updated to include {activity.title}.", type="update"))
     db.commit(); db.refresh(trip)
     return {"success": True, "summary": {"new_activity": activity.title,
-            "booking_reference": None, "cost_savings": 0}, "trip": _trip_dict(trip)}
+            "booking_reference": None, "cost_savings": 0}, "trip": _trip_dict(trip, db)}
 
 
 def _set_trip_request_status(trip_id: str, status: str, db: Session):
@@ -723,7 +847,7 @@ def _set_trip_request_status(trip_id: str, status: str, db: Session):
     trip.status = status
     _record_change(db, trip, f"request_{status}", "status", status, f"Trip request {status} by operator.", "operator")
     db.commit(); db.refresh(trip)
-    return {"success": True, "trip": _trip_dict(trip)}
+    return {"success": True, "trip": _trip_dict(trip, db)}
 
 
 @router.post("/trips/{trip_id}/accept-request")
@@ -842,7 +966,7 @@ def operator_login(payload: Dict[str, Any] = Body(default={}), db: Session = Dep
 def _commit_trip(db: Session, trip: Trip, action: str, field: str, value: str, reason: str) -> Dict[str, Any]:
     _record_change(db, trip, action, field, value, reason)
     db.commit(); db.refresh(trip)
-    return _trip_dict(trip)
+    return _trip_dict(trip, db)
 
 
 @router.post("/trips/{trip_id}/change-transport")
@@ -885,6 +1009,41 @@ def change_accommodation(trip_id: str, payload: Dict[str, Any] = Body(default={}
 @router.post("/trips/{trip_id}/change-day-accommodation")
 def change_daily_accommodation(trip_id: str, payload: Dict[str, Any] = Body(default={}), db: Session = Depends(get_db)):
     return _change_accommodation(trip_id, payload, db, True)
+
+
+@router.post("/trips/{trip_id}/select-hotel")
+def select_hotel(trip_id: str, selection: SelectHotelRequest, db: Session = Depends(get_db)):
+    """Persist a traveler-selected (e.g. SerpApi live) hotel against the trip.
+
+    Reuses the existing itinerary hotel-item structure: hotel_id stays None
+    (no catalog row exists) while the property token, dates, price, and
+    provider metadata are retained in meta_data for later identification.
+    """
+    trip = _trip_or_404(db, trip_id)
+    total = selection.total_price
+    if total is None and selection.price_per_night is not None:
+        total = selection.price_per_night * max(1, (trip.duration_days or 2) - 1)
+    item = next((i for i in trip.itinerary if i.item_type == "hotel" and i.day_number == selection.day_number), None)
+    if not item:
+        item = ItineraryItem(trip_id=trip.id, day_number=selection.day_number, order_index=99,
+                             item_type="hotel", title=selection.name)
+        db.add(item)
+    item.hotel_id = None
+    item.title = selection.name
+    item.description = selection.description
+    item.location = selection.location
+    item.cost = float(total or 0)
+    item.status = "confirmed"
+    item.meta_data = {"provider": "serpapi", "property_token": selection.property_token,
+                      "name": selection.name, "location": selection.location,
+                      "image_url": selection.image_url, "description": selection.description,
+                      "price_per_night": selection.price_per_night, "total_price": total,
+                      "currency": (selection.currency or trip.currency or "INR").upper(),
+                      "rating": selection.rating, "hotel_class": selection.hotel_class,
+                      "amenities": selection.amenities or [],
+                      "check_in_date": selection.check_in_date, "check_out_date": selection.check_out_date}
+    return _commit_trip(db, trip, "hotel_selected", "hotel", selection.name,
+                        "Traveler selected a live hotel search result.")
 
 
 @router.post("/trips/{trip_id}/add-activity")
@@ -1005,4 +1164,4 @@ def lock_booking(trip_id: str, payload: Dict[str, Any] = Body(default={}), db: S
     db.add(booking); db.flush()
     _record_change(db, trip, "booking_locked", "booking", booking.booking_reference, "Booking choice saved.", "ai" if mode == "ai_guide" else "user")
     db.commit(); db.refresh(trip)
-    return {"success": True, "booking": _booking_dict(booking), "trip": _trip_dict(trip)}
+    return {"success": True, "booking": _booking_dict(booking), "trip": _trip_dict(trip, db)}

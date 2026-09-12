@@ -9,6 +9,7 @@ import {
   AIChatResponse,
   OperatorVendor,
   PossibleOptionItem,
+  HotelSearchResponse,
 } from '../types/tourflow';
 
 const API_BASE = '/api';
@@ -635,6 +636,61 @@ export const TourFlowApi = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Failed to change accommodation' }));
       throw new Error(err.detail || 'Failed to change accommodation');
+    }
+    return await res.json();
+  },
+
+  // Live hotel search (SerpApi via backend; the key never reaches the browser).
+  async searchHotels(params: {
+    destination: string;
+    check_in_date: string;
+    check_out_date: string;
+    adults?: number;
+    children?: number;
+    currency?: string;
+    gl?: string;
+    hl?: string;
+    min_price?: number;
+    max_price?: number;
+    min_rating?: number;
+  }): Promise<HotelSearchResponse> {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+    });
+    const res = await fetch(`${API_BASE}/hotels/search?${query.toString()}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Hotel search failed' }));
+      throw new Error(err.detail || 'Hotel search failed');
+    }
+    return await res.json();
+  },
+
+  // Persist a traveler-selected live hotel against the trip itinerary.
+  async selectHotel(tripId: string, selection: {
+    day_number?: number;
+    property_token?: string | null;
+    name: string;
+    location?: string | null;
+    image_url?: string | null;
+    description?: string | null;
+    price_per_night?: number | null;
+    total_price?: number | null;
+    currency?: string;
+    rating?: number | null;
+    hotel_class?: number | null;
+    amenities?: string[];
+    check_in_date?: string | null;
+    check_out_date?: string | null;
+  }): Promise<Trip> {
+    const res = await fetch(`${API_BASE}/trips/${tripId}/select-hotel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selection),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to save hotel selection' }));
+      throw new Error(err.detail || 'Failed to save hotel selection');
     }
     return await res.json();
   },

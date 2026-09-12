@@ -1485,6 +1485,73 @@ function resolveDailySplitAccommodations(params: {
 }
 
 // ----------------------------------------------------
+// Live trip enrichment (SerpApi hotels + Overpass/Commons places via FastAPI).
+// Best-effort only: any failure returns empty lists and trip creation falls
+// back to the existing static content. No provider data is ever invented.
+// ----------------------------------------------------
+function getFastApiBase(): string {
+  try {
+    if (typeof FASTAPI_BASE_URL === 'string' && FASTAPI_BASE_URL) return FASTAPI_BASE_URL;
+  } catch (err) { /* fall through to default */ }
+  return 'http://localhost:8000';
+}
+
+async function fetchLiveTripEnrichment(params: {
+  destination: string; checkIn: string; checkOut: string; travelers: number; currency: string;
+}): Promise<{ hotels: any[]; places: any[] }> {
+  const empty = { hotels: [], places: [] };
+  const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(params.checkIn) && /^\d{4}-\d{2}-\d{2}$/.test(params.checkOut);
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 9000);
+    const base = getFastApiBase();
+    const [hotelsRes, placesRes] = await Promise.all([
+      dateOk
+        ? fetch(`${base}/api/hotels/search?destination=${encodeURIComponent(params.destination)}&check_in_date=${params.checkIn}&check_out_date=${params.checkOut}&adults=${params.travelers}&currency=${encodeURIComponent(params.currency)}`, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
+        : null,
+      fetch(`${base}/api/places/live?destination=${encodeURIComponent(params.destination)}&limit=12`, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    clearTimeout(timer);
+    return { hotels: hotelsRes?.results || [], places: placesRes?.places || [] };
+  } catch (err) {
+    return empty;
+  }
+}
+
+function mapLiveHotelToAccommodation(hotel: any, params: {
+  nights: number; travelers: number; currency: string; destName: string;
+}): AccommodationOption {
+  const rooms = Math.max(1, Math.ceil(params.travelers / 2));
+  const perNight = (hotel.price_per_night || 0) * rooms;
+  const category = hotel.hotel_class && hotel.hotel_class >= 4 ? 'luxury' : 'mid-range';
+  return {
+    id: hotel.id, name: hotel.name, rating: hotel.rating ?? 0, review_count: hotel.reviews_count ?? 0,
+    category, location: params.destName,
+    room_type: `${rooms}x Standard Room (${params.travelers} Guests)`,
+    price_per_night: perNight, total_price: perNight * params.nights, nights: params.nights,
+    amenities: hotel.amenities || [],
+    why_it_matches: `Live verified stay in ${params.destName} via Google Hotels.`,
+    hero_image: hotel.image_url || '', images: hotel.image_url ? [hotel.image_url] : [],
+    badge: 'best_match',
+  };
+}
+
+function applyLivePlacesToItinerary(itinerary: any[], places: any[], destName: string): void {
+  if (!places || places.length === 0 || !itinerary) return;
+  // Replace activity titles/images with real verified places (one use each,
+  // no duplicates); times, ordering, and estimated costs are preserved.
+  const targets = itinerary.filter((i) => (i.item_type === 'activity' || i.item_type === 'leisure') && !i.is_disabled);
+  targets.forEach((item, idx) => {
+    if (idx >= places.length) return;
+    const place = places[idx];
+    item.title = place.name;
+    item.location = destName;
+    if (place.image_url) item.image_url = place.image_url;
+    item.description = `Live verified attraction in ${destName}${place.kind ? ` (${place.kind})` : ''}.`;
+  });
+}
+
+// ----------------------------------------------------
 // Itinerary Generation Engine (Non-Repetitive & Full Duration)
 // ----------------------------------------------------
 function generateCanonicalItinerary(params: {
@@ -1770,13 +1837,37 @@ async function buildCanonicalTripAsync(params: {
     targetBudget,
   });
 
+  // 2b. Live enrichment (best-effort): real SerpApi hotels replace the static
+  // selection when available; costs downstream recompute from live prices.
+  const liveEnrichment = await fetchLiveTripEnrichment({
+    destination: destObj.name,
+    checkIn: startDate.slice(0, 10), checkOut: endDate.slice(0, 10),
+    travelers: travelersCount, currency,
+  });
+  let resolvedAccommodation = selectedAccommodation;
+  let resolvedAccommodationAlternatives = accommodationAlternatives;
+  if (liveEnrichment.hotels.length > 0) {
+    const nights = Math.max(1, duration - 1);
+    const mapped = liveEnrichment.hotels.map((h: any) =>
+      mapLiveHotelToAccommodation(h, { nights, travelers: travelersCount, currency, destName: destObj.name }));
+    const cheapest = [...mapped].sort((a, b) => a.price_per_night - b.price_per_night)[0];
+    const topRated = [...mapped].sort((a, b) => b.rating - a.rating)[0];
+    mapped.forEach((m) => {
+      m.badge = m.id === cheapest.id ? 'cheapest' : m.id === topRated.id ? 'best_rated'
+        : m.category === 'luxury' ? 'luxury' : 'best_match';
+    });
+    mapped[0].badge = 'best_match';
+    resolvedAccommodation = mapped[0];
+    resolvedAccommodationAlternatives = mapped.slice(1);
+  }
+
   const numNights = Math.max(1, duration - 1);
   const dailyAccommodations = [];
   for (let d = 1; d <= numNights; d++) {
     dailyAccommodations.push({
       day_number: d,
-      hotel: selectedAccommodation,
-      alternatives: accommodationAlternatives,
+      hotel: resolvedAccommodation,
+      alternatives: resolvedAccommodationAlternatives,
     });
   }
 
@@ -1792,25 +1883,29 @@ async function buildCanonicalTripAsync(params: {
     totalBudget: targetBudget,
     origin: params.origin || 'Mumbai',
     transport: selectedTransport,
-    accommodation: selectedAccommodation,
+    accommodation: resolvedAccommodation,
     dailyAccommodations,
     interests: params.preferences?.interests,
     budgetTier: params.preferences?.budget_tier || 'moderate',
   });
 
+  // 3a. Overlay real verified places onto activity slots (names + images only;
+  // times, ordering, and estimated costs are preserved).
+  applyLivePlacesToItinerary(itinerary, liveEnrichment.places, destObj.name);
+
   // 3b. Compute Multi-Hotel 5km Radius Split Allocations
   const finalDailyAccommodations = resolveDailySplitAccommodations({
     destName: destObj.name,
     duration,
-    selectedAccommodation,
-    alternatives: accommodationAlternatives,
+    selectedAccommodation: resolvedAccommodation,
+    alternatives: resolvedAccommodationAlternatives,
     rawItinerary: itinerary,
   });
 
   const totalStayCostAsync = finalDailyAccommodations.reduce((sum, d) => sum + (d.hotel?.price_per_night || 0), 0);
   const effectiveAccommodationAsync = {
-    ...selectedAccommodation,
-    total_price: totalStayCostAsync > 0 ? totalStayCostAsync : selectedAccommodation.total_price,
+    ...resolvedAccommodation,
+    total_price: totalStayCostAsync > 0 ? totalStayCostAsync : resolvedAccommodation.total_price,
   };
 
   // 4. Calculate Canonical Cost Breakdown with strict Hard-Capped Budget Engine
@@ -1846,7 +1941,7 @@ async function buildCanonicalTripAsync(params: {
     selected_transport: selectedTransport,
     transport_alternatives: transportAlternatives,
     selected_accommodation: effectiveAccommodationAsync,
-    accommodation_alternatives: accommodationAlternatives,
+    accommodation_alternatives: resolvedAccommodationAlternatives,
     daily_accommodations: finalDailyAccommodations,
     cost_breakdown: costBreakdown,
     preferences: {
@@ -4167,6 +4262,76 @@ STRICT PARAMETER EXTRACTION & VERIFICATION RULES:
   });
 });
 */
+
+// ----------------------------------------------------
+// FastAPI bridge for FastAPI-owned hotel routes.
+// The browser always calls same-origin /api. In integrated dev mode this
+// Express server answers, so these two routes defer to the canonical FastAPI
+// implementation instead of reimplementing divergent logic:
+// - hotel search is proxied to FastAPI (holds the SerpApi key);
+// - hotel selection is persisted natively because traveler trips live in
+//   this server's tripsStore in integrated mode (same item semantics as the
+//   FastAPI endpoint: hotel item + provider metadata, no catalog mutation).
+// Production uses vercel.json rewrites straight to FastAPI.
+// ----------------------------------------------------
+const FASTAPI_BASE_URL = (process.env.FASTAPI_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+
+app.get('/api/hotels/search', async (req: Request, res: Response) => {
+  const query = new URLSearchParams(req.query as Record<string, string>).toString();
+  try {
+    const upstream = await fetch(`${FASTAPI_BASE_URL}/api/hotels/search?${query}`);
+    const text = await upstream.text();
+    res.status(upstream.status).type('application/json').send(text);
+  } catch (err) {
+    res.status(502).json({ detail: 'FastAPI backend is not reachable. Start it with: python -m uvicorn backend.main:app --port 8000' });
+  }
+});
+
+app.post('/api/trips/:id/select-hotel', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { day_number, property_token, name, location, image_url, description,
+    price_per_night, total_price, currency, rating, hotel_class, amenities,
+    check_in_date, check_out_date } = req.body || {};
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(422).json({ detail: 'Hotel name is required' });
+  }
+  const tripIndex = tripsStore.findIndex((t) => t.id === id);
+  if (tripIndex === -1) return res.status(404).json({ detail: 'Trip not found' });
+
+  const trip = tripsStore[tripIndex];
+  if (!trip.itinerary) trip.itinerary = [];
+  const targetDay = Number(day_number) || 1;
+  const nights = Math.max(1, (trip.duration_days || 2) - 1);
+  const total = total_price ?? (price_per_night != null ? Number(price_per_night) * nights : 0);
+  let item = trip.itinerary.find((i: any) => i.item_type === 'hotel' && i.day_number === targetDay);
+  if (!item) {
+    item = { id: `iti-${trip.id}-d${targetDay}-hotel-${Date.now()}`, trip_id: trip.id,
+             day_number: targetDay, order_index: 99, item_type: 'hotel', title: name.trim() };
+    trip.itinerary.push(item);
+  }
+  item.hotel_id = undefined;
+  item.title = name.trim();
+  item.description = description || undefined;
+  item.location = location || trip.destination?.name;
+  item.image_url = image_url || undefined;
+  item.cost = Number(total) || 0;
+  item.status = 'confirmed';
+  item.meta_data = { provider: 'serpapi', property_token: property_token || null, name: item.title,
+    location: item.location, image_url: item.image_url || null, description: item.description || null,
+    price_per_night: price_per_night ?? null, total_price: Number(total) || 0,
+    currency: (currency || trip.currency || 'INR').toUpperCase(), rating: rating ?? null,
+    hotel_class: hotel_class ?? null, amenities: amenities || [],
+    check_in_date: check_in_date || null, check_out_date: check_out_date || null };
+  trip.change_history = [
+    { id: `chg-${Date.now()}`, trip_id: trip.id, changed_by: 'user', action: 'hotel_selected',
+      field_changed: 'hotel', new_value: item.title,
+      reason: `Traveler selected live hotel ${item.title}.`, timestamp: new Date().toISOString() },
+    ...(trip.change_history || []),
+  ];
+  trip.updated_at = new Date().toISOString();
+  tripsStore[tripIndex] = trip;
+  res.json(trip);
+});
 
 // ----------------------------------------------------
 // Vite Middleware & Static Server

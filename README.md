@@ -357,6 +357,7 @@ The Operator Suite (`/operator/*`) provides commercial management tools:
 | `GET` | `/api/destinations` | List all available destinations (optional: `?featured_only=true`). |
 | `GET` | `/api/destinations/:id` | Get destination details by UUID or slug (`manali`, `goa`, etc.). |
 | `GET` | `/api/hotels` | Query hotels with optional `?destination_id=` and `?category=`. |
+| `GET` | `/api/hotels/search?destination=&check_in_date=&check_out_date=` | Live SerpApi hotel search (backend key). Optional `adults/children/currency/gl/hl/min_price/max_price/min_rating`. 503 when unconfigured, 422 on bad input, 502 on provider failure. |
 | `GET` | `/api/activities` | Query activities with optional `?destination_id=` and `?category=`. |
 | `GET` | `/api/transport` | Query transport options with optional `?destination_id=` and `?type=`. |
 | `GET` | `/api/trips` | Query trips with optional filters (`?status=`, `?search=`, `?operator_id=`). |
@@ -367,6 +368,7 @@ The Operator Suite (`/operator/*`) provides commercial management tools:
 | `PUT` | `/api/trips/:id/preferences` | Update budget tier, interests, and dietary requirements. |
 | `POST` | `/api/trips/:id/change-transport` | Update active transport mode and recalculate trip budget. |
 | `POST` | `/api/trips/:id/change-accommodation` | Update trip-wide hotel accommodation and recompute costs. |
+| `POST` | `/api/trips/:id/select-hotel` | Persist a traveler-selected live (SerpApi) hotel as a trip itinerary hotel item with provider metadata. |
 | `POST` | `/api/trips/:id/change-daily-accommodation` | Update accommodation for a specific day slot. |
 | `POST` | `/api/trips/:id/add-activity` | Add an activity item to a specific day in the itinerary. |
 | `POST` | `/api/trips/:id/remove-activity` | Remove an activity item and update schedule order indices. |
@@ -734,6 +736,104 @@ npm run build
 ---
 
 ## AI Development Context / Change Log
+
+### 2026-09-12 Live Itinerary Generation (SerpApi Hotels + Overpass/Commons Places)
+
+Inspected:
+
+- Express trip creation (`POST /api/trips` → `buildCanonicalTripAsync` → `resolveAccommodationOptions` → `itineraryService.generateItinerary` → `validateAndEnforceItinerary`), `getOrCreateDestination` (unknown destinations get generic fallback content), FastAPI `POST /api/trips` (rejects non-catalog destinations, so live generation stays in Express), `backend/api/routes.py`, `backend/database/config.py`, `tests/test_backend.py`.
+
+Changed:
+
+- Added `backend/places/` service (new, keyless, backend-only): Nominatim geocode for unknown destinations, Overpass tourist POIs (real names + coordinates, nameless records skipped), Wikimedia Commons geotagged thumbnails (upload.wikimedia.org only). All helpers never raise; failures yield empty results.
+- Added `GET /api/places/live?destination=&limit=` (always 200, possibly empty; 422 on blank destination) with `LivePlace`/`PlacesLiveResponse` schemas and provider settings (`NOMINATIM/OVERPASS/COMMONS_API_URL`, `PLACES_TIMEOUT_S/RADIUS_M/MAX_RESULTS`).
+- Express `buildCanonicalTripAsync` now best-effort enriches every generated trip: top SerpApi hotels (via FastAPI `/api/hotels/search` with trip dates) replace the static selection/alternatives as `AccommodationOption`s, and live places overwrite activity titles/locations/images/descriptions one-use-only (times, ordering, and estimated activity costs preserved since providers supply no activity prices). Any provider failure returns empty and generation falls back to existing static content. Cost breakdown recomputes from the live hotel price automatically.
+- No frontend changes were needed (itinerary/hotel UI already renders title/image/cost generically). No catalog mutation, no Gemini involvement in hotel/place data.
+
+Files modified:
+
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `backend/database/config.py`
+- `server.ts`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `backend/places/__init__.py`
+- `backend/places/service.py`
+
+APIs/routes added:
+
+- `GET /api/places/live` — live places with provider-backed images.
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q`: passed (66 passed, 84 warnings), including 4 new mocked places tests (catalog-coords mapping, unknown-destination geocode path, all-fail empty, never-raises units).
+- `npx.cmd tsc --noEmit --pretty false`: passed with no diagnostics.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean.
+- Live verification with both servers running: `POST /api/trips` (Uttar Pradesh, Delhi origin, 2 travelers, 2026-11-01→04) returned a 4-day itinerary with SerpApi hotel "Mansingh Palace" (₹721/night, real image, 9 alternatives), real OSM places (Aliganj Common Park, Bhuiyan Devi Mandir, CSIR park, all with images), and total ₹27,963 of ₹80,000 budget computed from the live hotel price (1 SerpApi credit used).
+
+Known remaining issues:
+
+- Each trip creation with valid dates triggers one SerpApi search (credit use); unparseable dates skip the hotel fetch but places still resolve.
+- Live places carry no prices, so activity costs remain estimates while accommodation cost is live.
+- Nominatim resolves state-level queries (e.g. "Uttar Pradesh") to the state center, so places cluster near that point (Lucknow area).
+
+### 2026-09-12 SerpApi Google Hotels Live Search + Trip Selection
+
+Inspected:
+
+- SerpApi Google Hotels docs (`engine=google_hotels`, `q/check_in_date/check_out_date/adults/children/currency/gl/hl/rating` params, `properties[]` shape with `property_token/rate_per_night/total_rate/images/overall_rating/amenities/hotel_class`, `api_key` auth, error semantics).
+- `backend/api/routes.py`, `backend/models/models.py` (`ItineraryItem.hotel_id` nullable, `meta_data` JSON), `backend/database/config.py`, `.gitignore` (`.env*` ignored), `src/services/api.ts`, `src/types/tourflow.ts`, `src/components/AIChatConsole.tsx` hotel modal, `tests/test_backend.py`.
+
+Changed:
+
+- Stored the provided SerpApi key in local gitignored `.env` as `SERPAPI_API_KEY` only (never in source, `.env.example` holds an empty placeholder, no `VITE_` or frontend references).
+- Added `backend/hotels/` service (new): bounded `GET {base}/search` via httpx with timeout, `YYYY-MM-DD`/checkout-after-checkin validation, rating-to-SerpApi-filter mapping, and defensive normalization (name required; prices from `extracted_lowest` with vendor fallback; image prefers `original_image`; missing fields yield None; malformed records skipped).
+- Added `GET /api/hotels/search` (destination/check-in/check-out required; adults/children/currency/gl/hl/price/rating optional): 503 when key unconfigured, 422 on bad dates/input, 502 on provider timeout/error, 200 with normalized `SerpApiHotelResult[]` (empty when none).
+- Added `POST /api/trips/{trip_id}/select-hotel`: persists the traveler-selected live hotel as a hotel `ItineraryItem` (`hotel_id` None, property token/dates/price/provider metadata in `meta_data`, status confirmed) and returns the updated trip via the existing commit path. No schema migration, no duplicate trip system.
+- Restored the FastAPI trip hotel contract in `_trip_dict` (`selected_accommodation`, `accommodation_alternatives`, `daily_accommodations` from canonical itinerary + catalog data; `_trip_dict(trip, db)` at all call sites) since it was absent from the tree; the SerpApi selection surfaces as a persisted itinerary hotel item.
+- Frontend: `SerpApiHotelResult`/`HotelSearchResponse` types, `TourFlowApi.searchHotels()`/`selectHotel()` (backend only), and a Live search section in the existing hotel modal (date/guest inputs, loading/empty/error states, result cards with SmartImage, Select to save with trip state update + chat confirmation). Refresh-safe via persisted itinerary items.
+
+Files modified:
+
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `backend/database/config.py`
+- `.env.example`
+- `src/types/tourflow.ts`
+- `src/services/api.ts`
+- `src/components/AIChatConsole.tsx`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `backend/hotels/__init__.py`
+- `backend/hotels/service.py`
+
+APIs/routes added:
+
+- `GET /api/hotels/search` — live normalized hotel search.
+- `POST /api/trips/{trip_id}/select-hotel` — persist a selected live hotel to the trip.
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q`: passed (62 passed, 84 warnings), including 8 new mocked-transport SerpApi tests (mapping, missing/malformed fields, invalid dates, empty results, error+timeout, missing key, key-never-in-frontend, select-persist-refresh) plus 4 trip-hotel-contract tests.
+- `npx.cmd tsc --noEmit --pretty false`: passed with no diagnostics.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean.
+- Live verification (2 real SerpApi calls, Manali 2026-10-01 to 2026-10-04, INR): direct API 200 with 20 properties; `GET /api/hotels/search` via TestClient 200 with 10 normalized results (real hotel, INR 1073.0, rating 4.55, image and property token present). This caught and fixed a double-`/search` base-URL bug before final verification.
+- Browser-path diagnosis and fix: the frontend calls same-origin `/api`, which the integrated Express dev server answers from its own implementation that lacked the two new routes (404 → error UI, no names/images). Added a minimal `server.ts` bridge: `GET /api/hotels/search` proxies to FastAPI (`FASTAPI_BASE_URL`, default `http://localhost:8000`); `POST /api/trips/:id/select-hotel` persists natively in the Express trip store with the same item semantics because traveler trips live there in integrated mode. Verified live with both servers running: search via `:3000` returned 10 real results; select persisted and a fresh `GET` showed the SerpApi hotel (day 2, image present). This also required restarting a stale pre-existing `:3000` process that predated the fix.
+
+Known remaining issues:
+
+- SerpApi free search returns random future-date rates and supplies no street addresses; the selection is stored as an itinerary hotel item with provider metadata rather than a catalog `selected_accommodation` card.
+- The SerpApi key travels in the outbound HTTPS query string per SerpApi's auth design; it is never stored or logged by the app, but verbose HTTP debug logging would echo request URLs.
+- Local live search needs both servers: FastAPI on `:8000` (holds `SERPAPI_API_KEY`) plus `npm run dev` on `:3000`. If FastAPI is down, search returns a clear 502 message instead of results.
 
 ### 2026-09-08 Frontend Type Contract Corrections
 

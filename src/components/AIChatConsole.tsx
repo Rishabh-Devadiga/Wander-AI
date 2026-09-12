@@ -11,7 +11,7 @@ import {
   Camera, Sun, CloudSun, Maximize2, Download, EyeOff, Plus, Minus, Trash2, SlidersVertical
 } from 'lucide-react';
 import { TourFlowApi } from '../services/api';
-import { Trip, Destination, TripPreference, ItineraryItem, TransportBookingOption, AccommodationOption, PossibleOptionItem } from '../types/tourflow';
+import { Trip, Destination, TripPreference, ItineraryItem, TransportBookingOption, AccommodationOption, PossibleOptionItem, SerpApiHotelResult } from '../types/tourflow';
 import { SmartImage } from './SmartImage';
 import { TripInteractiveMap } from './TripInteractiveMap';
 import { PossibleOptionsTray } from './PossibleOptionsTray';
@@ -106,6 +106,15 @@ export default function AIChatConsole({
   const [adjustingBudgetVal, setAdjustingBudgetVal] = useState<number>(75000);
   const [adjustingBudgetInputStr, setAdjustingBudgetInputStr] = useState<string>('75000');
   const [changingEntityLoading, setChangingEntityLoading] = useState(false);
+
+  // Live hotel search (SerpApi via backend; key never reaches the browser)
+  const [liveHotelResults, setLiveHotelResults] = useState<SerpApiHotelResult[]>([]);
+  const [liveHotelLoading, setLiveHotelLoading] = useState(false);
+  const [liveHotelError, setLiveHotelError] = useState<string | null>(null);
+  const [liveHotelSearched, setLiveHotelSearched] = useState(false);
+  const [liveCheckIn, setLiveCheckIn] = useState('');
+  const [liveCheckOut, setLiveCheckOut] = useState('');
+  const [liveAdults, setLiveAdults] = useState('2');
 
   // Date selection state
   const [pickerStartDate, setPickerStartDate] = useState('2026-09-21');
@@ -1253,6 +1262,78 @@ You can select any option or lock it in via AI Guide or direct self-booking!`,
       }
     } catch (err) {
       console.error(err);
+    } finally {
+      setChangingEntityLoading(false);
+    }
+  };
+
+  // Live hotel search via backend (SerpApi)
+  const handleLiveHotelSearch = async () => {
+    if (!generatedTrip) return;
+    const checkIn = liveCheckIn || (generatedTrip.start_date || '').slice(0, 10);
+    const checkOut = liveCheckOut || (generatedTrip.end_date || '').slice(0, 10);
+    if (!checkIn || !checkOut) {
+      setLiveHotelError('Please choose check-in and check-out dates to search live hotels.');
+      return;
+    }
+    setLiveHotelLoading(true);
+    setLiveHotelError(null);
+    try {
+      const result = await TourFlowApi.searchHotels({
+        destination: generatedTrip.destination?.name || '',
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        adults: Math.max(1, parseInt(liveAdults || '2', 10) || 2),
+        currency: generatedTrip.currency || 'INR',
+      });
+      setLiveHotelResults(result.results || []);
+      setLiveHotelSearched(true);
+    } catch (err: any) {
+      setLiveHotelError(err?.message || 'Live hotel search failed. Please try again.');
+      setLiveHotelSearched(true);
+    } finally {
+      setLiveHotelLoading(false);
+    }
+  };
+
+  // Persist a traveler-selected live hotel against the trip itinerary
+  const handleSelectLiveHotel = async (hotel: SerpApiHotelResult) => {
+    if (!generatedTrip) return;
+    setChangingEntityLoading(true);
+    try {
+      const checkIn = liveCheckIn || (generatedTrip.start_date || '').slice(0, 10) || null;
+      const checkOut = liveCheckOut || (generatedTrip.end_date || '').slice(0, 10) || null;
+      const updated = await TourFlowApi.selectHotel(generatedTrip.id, {
+        day_number: selectedDayForHotelChange ?? 1,
+        property_token: hotel.property_token,
+        name: hotel.name,
+        location: hotel.location,
+        image_url: hotel.image_url,
+        description: hotel.description,
+        price_per_night: hotel.price_per_night,
+        total_price: hotel.total_price,
+        currency: hotel.currency,
+        rating: hotel.rating,
+        hotel_class: hotel.hotel_class,
+        amenities: hotel.amenities,
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+      });
+      setGeneratedTrip(updated);
+      setShowHotelModal(false);
+      setTripUpdateToast(`Saved "${hotel.name}" to your trip!`);
+      setTimeout(() => setTripUpdateToast(null), 3500);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `bot-live-hotel-${Date.now()}`,
+          sender: 'bot',
+          text: `🏨 Saved **${hotel.name}** to Day ${selectedDayForHotelChange ?? 1} of your itinerary. Refresh anytime — your selection is stored with the trip.`,
+          suggestions: ['View day-by-day itinerary', 'Search more hotels', 'Lock in booking'],
+        },
+      ]);
+    } catch (err: any) {
+      setLiveHotelError(err?.message || 'Could not save the selected hotel. Please try again.');
     } finally {
       setChangingEntityLoading(false);
     }
@@ -2949,6 +3030,77 @@ You can select any option or lock it in via AI Guide or direct self-booking!`,
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Live hotel search (real SerpApi results via backend) */}
+            <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/40 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-emerald-600 text-white">Live</span>
+                <strong className="text-sm font-bold text-stone-950">Search real hotels</strong>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <label className="text-[11px] font-semibold text-stone-600">Check-in
+                  <input type="date" value={liveCheckIn} onChange={(e) => setLiveCheckIn(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-white border border-stone-200 text-xs text-stone-900" />
+                </label>
+                <label className="text-[11px] font-semibold text-stone-600">Check-out
+                  <input type="date" value={liveCheckOut} onChange={(e) => setLiveCheckOut(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-white border border-stone-200 text-xs text-stone-900" />
+                </label>
+                <label className="text-[11px] font-semibold text-stone-600">Adults
+                  <input type="number" min={1} max={16} value={liveAdults} onChange={(e) => setLiveAdults(e.target.value)}
+                    className="mt-1 w-full px-2 py-1.5 rounded-lg bg-white border border-stone-200 text-xs text-stone-900" />
+                </label>
+                <div className="flex items-end">
+                  <button onClick={handleLiveHotelSearch} disabled={liveHotelLoading || changingEntityLoading}
+                    className="w-full px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-bold cursor-pointer inline-flex items-center justify-center gap-1.5">
+                    <RefreshCw className={`w-3.5 h-3.5 ${liveHotelLoading ? 'animate-spin' : ''}`} />
+                    {liveHotelLoading ? 'Searching…' : 'Search live'}
+                  </button>
+                </div>
+              </div>
+              {liveHotelError && (
+                <p className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">{liveHotelError}</p>
+              )}
+              {liveHotelSearched && !liveHotelLoading && !liveHotelError && liveHotelResults.length === 0 && (
+                <p className="text-xs text-stone-500">No live hotels found for these dates. Try different dates.</p>
+              )}
+              {liveHotelResults.length > 0 && (
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {liveHotelResults.map((hotel) => (
+                    <div key={hotel.id} className="p-3 rounded-xl bg-white border border-stone-200 flex items-start gap-3">
+                      <div className="w-20 h-16 rounded-lg overflow-hidden shrink-0 bg-stone-200">
+                        <SmartImage src={hotel.image_url} alt={hotel.name}
+                          className="w-full h-full object-cover" containerClassName="w-full h-full" fallbackText={hotel.name} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <strong className="text-sm font-bold text-stone-950 line-clamp-1">{hotel.name}</strong>
+                        <p className="text-[11px] text-stone-600 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                          {hotel.rating !== undefined && hotel.rating !== null && <span>⭐ {hotel.rating}{hotel.reviews_count ? ` (${hotel.reviews_count})` : ''}</span>}
+                          {hotel.hotel_class ? <span>• {hotel.hotel_class}-star</span> : null}
+                          {hotel.location ? <span className="inline-flex items-center gap-0.5"><MapPin className="w-3 h-3" />{hotel.location}</span> : null}
+                        </p>
+                        {hotel.amenities && hotel.amenities.length > 0 && (
+                          <p className="text-[11px] text-stone-500 mt-0.5 line-clamp-1">{hotel.amenities.slice(0, 4).join(' • ')}</p>
+                        )}
+                        <div className="flex items-center justify-between mt-1.5 gap-2">
+                          <span className="text-sm font-black text-stone-950">
+                            {hotel.total_price !== undefined && hotel.total_price !== null
+                              ? `${hotel.currency} ${hotel.total_price.toLocaleString()} total`
+                              : hotel.price_per_night !== undefined && hotel.price_per_night !== null
+                                ? `${hotel.currency} ${hotel.price_per_night.toLocaleString()}/night`
+                                : 'Price on request'}
+                          </span>
+                          <button onClick={() => handleSelectLiveHotel(hotel)} disabled={changingEntityLoading}
+                            className="px-3 py-1.5 rounded-full bg-stone-950 hover:bg-black disabled:opacity-60 text-white text-xs font-bold cursor-pointer shrink-0">
+                            Select
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="space-y-3">

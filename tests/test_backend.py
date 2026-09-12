@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1482,3 +1483,416 @@ def test_operator_ai_assistant_routes_current_trip_id_through_agent8_service(mon
     assert calls[0].message == "What is planned on Day 3?"
     assert body["reply"] == "Grounded response from current_trip id."
     assert body["context_validated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Trip hotel contract: selected_accommodation + alternatives from canonical data
+# ---------------------------------------------------------------------------
+_HOTEL_OPTION_KEYS = {
+    "id", "name", "rating", "review_count", "category", "location",
+    "room_type", "price_per_night", "total_price", "nights", "amenities",
+    "why_it_matches", "hero_image", "images", "badge",
+}
+
+
+def _create_hotel_contract_trip():
+    dest_res = client.get("/api/destinations/manali")
+    manali_id = dest_res.json()["id"]
+    payload = {
+        "title": "Hotel Contract Trip", "destination_id": manali_id,
+        "duration_days": 3, "total_budget": 60000.0, "currency": "INR",
+        "traveler_count": 2, "pace": "balanced",
+        "preferences": {
+            "budget_tier": "luxury", "interests": ["snow"],
+            "travel_companions": "couple",
+        },
+    }
+    create_res = client.post("/api/trips", json=payload)
+    assert create_res.status_code == 200
+    return create_res.json()
+
+
+def test_trip_response_includes_selected_accommodation_contract():
+    trip = _create_hotel_contract_trip()
+    selected = trip["selected_accommodation"]
+    assert selected is not None
+    assert _HOTEL_OPTION_KEYS.issubset(set(selected.keys()))
+    assert selected["badge"] == "best_match"
+    assert selected["nights"] == 2
+    assert selected["total_price"] == pytest.approx(selected["price_per_night"] * 2)
+    assert isinstance(selected["amenities"], list) and isinstance(selected["images"], list)
+
+    alternatives = trip["accommodation_alternatives"]
+    assert isinstance(alternatives, list) and len(alternatives) >= 1
+    assert selected["id"] not in [a["id"] for a in alternatives]
+    for alt in alternatives:
+        assert _HOTEL_OPTION_KEYS.issubset(set(alt.keys()))
+
+    daily = trip["daily_accommodations"]
+    assert isinstance(daily, list) and len(daily) >= 1
+    assert daily[0]["hotel"]["id"] == selected["id"]
+
+    get_res = client.get(f"/api/trips/{trip['id']}")
+    assert get_res.status_code == 200
+    assert get_res.json()["selected_accommodation"]["id"] == selected["id"]
+
+
+def test_change_accommodation_updates_selected_accommodation():
+    trip = _create_hotel_contract_trip()
+    target_id = trip["accommodation_alternatives"][0]["id"]
+    change_res = client.post(
+        f"/api/trips/{trip['id']}/change-accommodation", json={"accommodation_id": target_id}
+    )
+    assert change_res.status_code == 200
+    updated = change_res.json()
+    assert updated["selected_accommodation"]["id"] == target_id
+    assert target_id not in [a["id"] for a in updated["accommodation_alternatives"]]
+
+
+def test_change_daily_accommodation_updates_day_hotel():
+    trip = _create_hotel_contract_trip()
+    target_id = trip["accommodation_alternatives"][0]["id"]
+    change_res = client.post(
+        f"/api/trips/{trip['id']}/change-day-accommodation",
+        json={"day_number": 2, "accommodation_id": target_id},
+    )
+    assert change_res.status_code == 200
+    daily = {d["day_number"]: d["hotel"]["id"] for d in change_res.json()["daily_accommodations"]}
+    assert daily[2] == target_id
+
+
+def test_trip_without_usable_hotel_items_returns_null_selection():
+    trip = _create_hotel_contract_trip()
+    trip_id = trip["id"]
+    db = SessionLocal()
+    try:
+        db.query(ItineraryItem).filter(
+            ItineraryItem.trip_id == trip_id, ItineraryItem.item_type == "hotel"
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    get_res = client.get(f"/api/trips/{trip_id}")
+    assert get_res.status_code == 200
+    body = get_res.json()
+    assert body["selected_accommodation"] is None
+    assert body["daily_accommodations"] == []
+    assert isinstance(body["accommodation_alternatives"], list)
+
+
+# ---------------------------------------------------------------------------
+# Live SerpApi hotel search (mocked transport; never hits the real API)
+# ---------------------------------------------------------------------------
+from backend.database.config import settings as _settings  # noqa: E402
+
+
+def _serpapi_property(**overrides):
+    prop = {
+        "property_token": "ChoQ5YiTp-rKmO60ARoNL2cvMTFzc2djMTNqcRAC",
+        "name": "Himalayan Ridge Live Hotel",
+        "gps_coordinates": {"latitude": 32.2396, "longitude": 77.1887},
+        "rate_per_night": {"lowest": "$152", "extracted_lowest": 152},
+        "total_rate": {"lowest": "$456", "extracted_lowest": 456},
+        "prices": [{"source": "Expedia", "rate_per_night": {"extracted_lowest": 152}}],
+        "images": [{"thumbnail": "https://example.test/t.jpg",
+                    "original_image": "https://example.test/o.jpg"}],
+        "overall_rating": 4.5,
+        "reviews": 12098,
+        "location_rating": 4.0,
+        "amenities": ["Spa", "Free WiFi"],
+        "hotel_class": 4,
+        "type": "Hotel",
+        "essential_info": ["Check-in 2PM", "Ski-in access"],
+    }
+    prop.update(overrides)
+    return prop
+
+
+class _FakeSerpApiResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def _mock_serpapi(monkeypatch, payload, key="test-serpapi-key"):
+    import backend.hotels.service as hotel_service
+
+    calls = {}
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", key)
+
+    def fake_get(url, params, timeout):
+        calls["url"] = url
+        calls["params"] = params
+        return _FakeSerpApiResponse(payload)
+
+    monkeypatch.setattr(hotel_service, "_http_get", fake_get)
+    return calls
+
+
+def _search_params(**overrides):
+    params = {"destination": "Manali", "check_in_date": "2026-10-01", "check_out_date": "2026-10-04"}
+    params.update(overrides)
+    return params
+
+
+def test_serpapi_search_success_and_mapping(monkeypatch):
+    calls = _mock_serpapi(monkeypatch, {"properties": [
+        _serpapi_property(),
+        _serpapi_property(property_token="tok-2", name="Second Stay", overall_rating=4.0),
+    ]})
+    response = client.get("/api/hotels/search", params=_search_params())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "serpapi"
+    assert body["destination"] == "Manali"
+    assert "manali" in calls["url"] or "search" in calls["url"]
+    assert calls["params"]["engine"] == "google_hotels"
+    assert calls["params"]["q"] == "Manali"
+    assert "api_key" not in str(calls["url"])
+    assert len(body["results"]) == 2
+    first = body["results"][0]
+    assert first["property_token"] == "ChoQ5YiTp-rKmO60ARoNL2cvMTFzc2djMTNqcRAC"
+    assert first["name"] == "Himalayan Ridge Live Hotel"
+    assert first["rating"] == pytest.approx(4.5)
+    assert first["reviews_count"] == 12098
+    assert first["latitude"] == pytest.approx(32.2396)
+    assert first["image_url"] == "https://example.test/o.jpg"
+    assert first["price_per_night"] == pytest.approx(152.0)
+    assert first["total_price"] == pytest.approx(456.0)
+    assert first["currency"] == "INR"
+    assert first["amenities"] == ["Spa", "Free WiFi"]
+    assert first["hotel_class"] == 4
+    assert first["source"] == "serpapi"
+
+
+def test_serpapi_missing_fields_and_malformed_records(monkeypatch):
+    _mock_serpapi(monkeypatch, {"properties": [
+        {"name": "Name Only Stay"},
+        {"hotel_class": 5},
+        "not-a-record",
+        None,
+    ]})
+    response = client.get("/api/hotels/search", params=_search_params())
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert len(results) == 1
+    only = results[0]
+    assert only["name"] == "Name Only Stay"
+    assert only["price_per_night"] is None and only["rating"] is None
+    assert only["image_url"] is None and only["hotel_class"] is None
+
+
+def test_serpapi_invalid_dates_and_missing_destination(monkeypatch):
+    _mock_serpapi(monkeypatch, {"properties": []})
+    assert client.get("/api/hotels/search", params=_search_params(
+        check_in_date="10-01-2026")).status_code == 422
+    assert client.get("/api/hotels/search", params=_search_params(
+        check_in_date="2026-10-04", check_out_date="2026-10-01")).status_code == 422
+    assert client.get("/api/hotels/search", params={
+        "check_in_date": "2026-10-01", "check_out_date": "2026-10-04"}).status_code == 422
+
+
+def test_serpapi_empty_results(monkeypatch):
+    _mock_serpapi(monkeypatch, {"properties": []})
+    response = client.get("/api/hotels/search", params=_search_params())
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+
+
+def test_serpapi_error_and_timeout(monkeypatch):
+    import httpx
+    import backend.hotels.service as hotel_service
+
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "test-serpapi-key")
+
+    def boom(url, params, timeout):
+        raise httpx.ConnectError("blocked")
+
+    monkeypatch.setattr(hotel_service, "_http_get", boom)
+    assert client.get("/api/hotels/search", params=_search_params()).status_code == 502
+
+    def slow(url, params, timeout):
+        raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(hotel_service, "_http_get", slow)
+    assert client.get("/api/hotels/search", params=_search_params()).status_code == 502
+
+    def api_error(url, params, timeout):
+        return _FakeSerpApiResponse({"error": "Invalid API key"})
+
+    monkeypatch.setattr(hotel_service, "_http_get", api_error)
+    assert client.get("/api/hotels/search", params=_search_params()).status_code == 502
+
+
+def test_serpapi_missing_key_returns_503_without_call(monkeypatch):
+    import backend.hotels.service as hotel_service
+
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "")
+
+    def must_not_run(url, params, timeout):
+        raise AssertionError("SerpApi must not be called without a key")
+
+    monkeypatch.setattr(hotel_service, "_http_get", must_not_run)
+    response = client.get("/api/hotels/search", params=_search_params())
+    assert response.status_code == 503
+
+
+def test_serpapi_key_never_in_frontend():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    offenders = []
+    for root, _, files in os.walk(os.path.join(repo, "src")):
+        for filename in files:
+            if filename.endswith((".ts", ".tsx")):
+                path = os.path.join(root, filename)
+                with open(path, encoding="utf-8") as handle:
+                    if "SERPAPI_API_KEY" in handle.read():
+                        offenders.append(path)
+    assert offenders == []
+
+
+def test_select_hotel_persists_and_survives_refresh(monkeypatch):
+    _mock_serpapi(monkeypatch, {"properties": [_serpapi_property()]})
+    search_res = client.get("/api/hotels/search", params=_search_params())
+    hotel = search_res.json()["results"][0]
+
+    trip = _create_hotel_contract_trip()
+    select_res = client.post(f"/api/trips/{trip['id']}/select-hotel", json={
+        "day_number": 2, "property_token": hotel["property_token"], "name": hotel["name"],
+        "location": "Manali", "image_url": hotel["image_url"], "price_per_night": hotel["price_per_night"],
+        "total_price": hotel["total_price"], "currency": hotel["currency"], "rating": hotel["rating"],
+        "hotel_class": hotel["hotel_class"], "amenities": hotel["amenities"],
+        "check_in_date": "2026-10-01", "check_out_date": "2026-10-04",
+    })
+    assert select_res.status_code == 200
+
+    # Fresh read (as after a page refresh) shows the selection in the itinerary.
+    get_res = client.get(f"/api/trips/{trip['id']}")
+    assert get_res.status_code == 200
+    hotel_items = [i for i in get_res.json()["itinerary"]
+                   if i["item_type"] == "hotel" and (i.get("meta_data") or {}).get("provider") == "serpapi"]
+    assert len(hotel_items) == 1
+    item = hotel_items[0]
+    assert item["title"] == "Himalayan Ridge Live Hotel"
+    assert item["day_number"] == 2
+    assert item["meta_data"]["property_token"] == "ChoQ5YiTp-rKmO60ARoNL2cvMTFzc2djMTNqcRAC"
+    assert item["meta_data"]["check_in_date"] == "2026-10-01"
+    # Catalog-backed selection contract still intact.
+    assert get_res.json()["selected_accommodation"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Live places/attractions (mocked transports; never hits real providers)
+# ---------------------------------------------------------------------------
+def _overpass_payload():
+    return {"elements": [
+        {"type": "node", "id": 1, "lat": 26.85, "lon": 80.94,
+         "tags": {"name": "Bara Imambara", "tourism": "attraction"}},
+        {"type": "node", "id": 2, "lat": 26.86, "lon": 80.95,
+         "tags": {"tourism": "museum"}},  # nameless: skipped
+        "not-an-element",
+        {"type": "way", "id": 3, "center": {"lat": 26.87, "lon": 80.96},
+         "tags": {"name": "Hazratganj Park", "leisure": "park"}},
+    ]}
+
+
+def _commons_payload():
+    return {"query": {"pages": {
+        "1": {"imageinfo": [{"thumburl": "https://upload.wikimedia.org/live-a.jpg"}]},
+        "2": {"imageinfo": [{"url": "https://upload.wikimedia.org/live-b.jpg"}]},
+        "3": {"imageinfo": [{"url": "https://example.test/fake.jpg"}]},
+    }}}
+
+
+class _FakeProviderResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def test_places_live_catalog_destination(monkeypatch):
+    import backend.places.service as places_service
+
+    def fake_post(url, data=None, timeout=None, headers=None):
+        return _FakeProviderResponse(_overpass_payload())
+
+    def fake_get(url, params=None, timeout=None, headers=None):
+        return _FakeProviderResponse(_commons_payload())
+
+    monkeypatch.setattr(places_service.httpx, "post", fake_post)
+    monkeypatch.setattr(places_service.httpx, "get", fake_get)
+    response = client.get("/api/places/live", params={"destination": "Manali", "limit": 5})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["destination"] == "Manali"
+    assert body["latitude"] == pytest.approx(32.2396)
+    assert body["source"] == "overpass+commons"
+    names = [p["name"] for p in body["places"]]
+    assert "Bara Imambara" in names and "Hazratganj Park" in names
+    assert all(p["image_url"] and p["image_url"].startswith("https://upload.wikimedia.org")
+               for p in body["places"])
+
+
+def test_places_live_unknown_destination_geocoded(monkeypatch):
+    import backend.places.service as places_service
+
+    seen = {}
+
+    def fake_get(url, params=None, timeout=None, headers=None):
+        if url.endswith("/search"):
+            seen["geocode_q"] = params["q"]
+            return _FakeProviderResponse([{"lat": "26.85", "lon": "80.94",
+                                           "display_name": "Uttar Pradesh, India"}])
+        return _FakeProviderResponse(_commons_payload())
+
+    def fake_post(url, data=None, timeout=None, headers=None):
+        seen["overpass_q"] = data["data"]
+        return _FakeProviderResponse(_overpass_payload())
+
+    monkeypatch.setattr(places_service.httpx, "get", fake_get)
+    monkeypatch.setattr(places_service.httpx, "post", fake_post)
+    response = client.get("/api/places/live", params={"destination": "Uttar Pradesh"})
+    assert response.status_code == 200
+    body = response.json()
+    assert seen["geocode_q"] == "Uttar Pradesh"
+    assert "26.85" in seen["overpass_q"]
+    assert len(body["places"]) == 2
+
+
+def test_places_live_all_providers_fail_returns_empty(monkeypatch):
+    import backend.places.service as places_service
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("blocked")
+
+    monkeypatch.setattr(places_service.httpx, "get", boom)
+    monkeypatch.setattr(places_service.httpx, "post", boom)
+    response = client.get("/api/places/live", params={"destination": "Uttar Pradesh"})
+    assert response.status_code == 200
+    assert response.json()["places"] == []
+    assert client.get("/api/places/live").status_code == 422
+
+
+def test_places_service_never_raises(monkeypatch):
+    from backend.places import service as places_service
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("blocked")
+
+    monkeypatch.setattr(places_service.httpx, "get", boom)
+    monkeypatch.setattr(places_service.httpx, "post", boom)
+    assert places_service.geocode_place("X", "http://x", 1) is None
+    assert places_service.fetch_attractions(0, 0, "http://x", 1, 1, 1) == []
+    assert places_service.fetch_place_images(0, 0, "http://x", 1, 1, 1) == []
+    result = places_service.get_live_places("Nowhere", None, None, 5,
+                                            "http://x", "http://x", "http://x", 1, 1)
+    assert result["places"] == []

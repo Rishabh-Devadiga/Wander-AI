@@ -116,6 +116,68 @@ class TransportRead(TransportBase):
     id: str
     created_at: datetime
 
+# Live places/attractions (normalized Overpass + Commons data)
+class LivePlace(BaseModel):
+    name: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    kind: Optional[str] = None
+    image_url: Optional[str] = None
+
+
+class PlacesLiveResponse(BaseModel):
+    destination: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    places: List[LivePlace] = Field(default_factory=list)
+    source: str = "overpass+commons"
+
+
+# Live SerpApi hotel search (normalized; never the raw provider payload)
+class SerpApiHotelResult(BaseModel):
+    id: str
+    property_token: Optional[str] = None
+    name: str
+    rating: Optional[float] = None
+    reviews_count: Optional[int] = None
+    location: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    image_url: Optional[str] = None
+    price_per_night: Optional[float] = None
+    total_price: Optional[float] = None
+    currency: str = "INR"
+    amenities: List[str] = Field(default_factory=list)
+    hotel_class: Optional[int] = None
+    description: Optional[str] = None
+    source: str = "serpapi"
+
+
+class HotelSearchResponse(BaseModel):
+    destination: str
+    check_in_date: str
+    check_out_date: str
+    currency: str
+    results: List[SerpApiHotelResult] = Field(default_factory=list)
+    source: str = "serpapi"
+
+
+class SelectHotelRequest(BaseModel):
+    day_number: int = Field(default=1, ge=1, le=62)
+    property_token: Optional[str] = Field(default=None, max_length=512)
+    name: str = Field(min_length=1, max_length=255)
+    location: Optional[str] = Field(default=None, max_length=500)
+    image_url: Optional[str] = Field(default=None, max_length=1024)
+    description: Optional[str] = None
+    price_per_night: Optional[float] = Field(default=None, ge=0)
+    total_price: Optional[float] = Field(default=None, ge=0)
+    currency: Optional[str] = Field(default="INR", min_length=3, max_length=10)
+    rating: Optional[float] = Field(default=None, ge=0, le=5)
+    hotel_class: Optional[int] = Field(default=None, ge=1, le=7)
+    amenities: List[str] = Field(default_factory=list, max_length=50)
+    check_in_date: Optional[str] = Field(default=None, max_length=10)
+    check_out_date: Optional[str] = Field(default=None, max_length=10)
+
 # Trip Preference Schemas
 class TripPreferenceBase(BaseModel):
     budget_tier: Optional[str] = "moderate"

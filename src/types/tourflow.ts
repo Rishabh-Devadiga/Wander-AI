@@ -178,6 +178,35 @@ export interface AccommodationOption {
   longitude?: number;
 }
 
+// Backend GET /api/hotels/search contract (normalized SerpApi results).
+export interface SerpApiHotelResult {
+  id: string;
+  property_token?: string | null;
+  name: string;
+  rating?: number | null;
+  reviews_count?: number | null;
+  location?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  image_url?: string | null;
+  price_per_night?: number | null;
+  total_price?: number | null;
+  currency: string;
+  amenities: string[];
+  hotel_class?: number | null;
+  description?: string | null;
+  source: 'serpapi';
+}
+
+export interface HotelSearchResponse {
+  destination: string;
+  check_in_date: string;
+  check_out_date: string;
+  currency: string;
+  results: SerpApiHotelResult[];
+  source: 'serpapi';
+}
+
 export interface DayAccommodation {
   day_number: number;
   date?: string;
