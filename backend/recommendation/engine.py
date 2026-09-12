@@ -19,6 +19,7 @@ class RecommendationEngine:
         self,
         destination_id: Optional[str],
         preferences: Dict[str, Any],
+        discovery_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         preferences = preferences or {}
         hotels_query = self.db.query(Hotel).filter(Hotel.is_active.is_(True))
@@ -28,6 +29,26 @@ class RecommendationEngine:
             hotels_query = hotels_query.filter(Hotel.destination_id == destination_id)
             activities_query = activities_query.filter(Activity.destination_id == destination_id)
             transport_query = transport_query.filter(TransportOption.destination_id == destination_id)
+        if discovery_session_id:
+            hotels_query = hotels_query.filter(
+                Hotel.inventory_source == "discovered",
+                Hotel.discovery_session_id == discovery_session_id,
+                Hotel.verification_status == "verified_candidate",
+            )
+            activities_query = activities_query.filter(
+                Activity.inventory_source == "discovered",
+                Activity.discovery_session_id == discovery_session_id,
+                Activity.verification_status == "verified_candidate",
+            )
+            transport_query = transport_query.filter(
+                TransportOption.inventory_source == "discovered",
+                TransportOption.discovery_session_id == discovery_session_id,
+                TransportOption.verification_status == "verified_candidate",
+            )
+        else:
+            hotels_query = hotels_query.filter(Hotel.inventory_source == "catalog")
+            activities_query = activities_query.filter(Activity.inventory_source == "catalog")
+            transport_query = transport_query.filter(TransportOption.inventory_source == "catalog")
 
         ranked_hotels = self._rank_hotels(hotels_query.all(), preferences)[:5]
         ranked_activities = self._rank_activities(activities_query.all(), preferences)[:6]
@@ -258,6 +279,9 @@ class RecommendationEngine:
             "description": hotel.description,
             "is_active": hotel.is_active,
             "created_at": hotel.created_at,
+            "inventory_source": hotel.inventory_source,
+            "verification_status": hotel.verification_status,
+            "discovery_session_id": hotel.discovery_session_id,
             "match_score": score,
         }
 
@@ -279,6 +303,9 @@ class RecommendationEngine:
             "meeting_point": activity.meeting_point,
             "is_active": activity.is_active,
             "created_at": activity.created_at,
+            "inventory_source": activity.inventory_source,
+            "verification_status": activity.verification_status,
+            "discovery_session_id": activity.discovery_session_id,
             "match_score": score,
         }
 
@@ -299,5 +326,8 @@ class RecommendationEngine:
             "features": option.features or [],
             "is_active": option.is_active,
             "created_at": option.created_at,
+            "inventory_source": option.inventory_source,
+            "verification_status": option.verification_status,
+            "discovery_session_id": option.discovery_session_id,
             "match_score": score,
         }

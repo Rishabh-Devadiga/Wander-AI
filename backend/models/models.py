@@ -60,6 +60,11 @@ class Destination(Base):
     is_featured = Column(Boolean, default=False)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
+    source_url = Column(String(1024), nullable=True)
+    evidence = Column(JSON, default=list)
+    inventory_source = Column(String(50), default="catalog", nullable=False)
+    verification_status = Column(String(50), default="catalog_verified", nullable=False)
+    discovery_session_id = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -103,6 +108,13 @@ class Hotel(Base):
     amenities = Column(JSON, default=list)  # ["Free WiFi", "Mountain View", "Spa"]
     images = Column(JSON, default=list)
     description = Column(Text, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    source_url = Column(String(1024), nullable=True)
+    evidence = Column(JSON, default=list)
+    inventory_source = Column(String(50), default="catalog", nullable=False)
+    verification_status = Column(String(50), default="catalog_verified", nullable=False)
+    discovery_session_id = Column(String(64), nullable=True, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -127,6 +139,13 @@ class Activity(Base):
     images = Column(JSON, default=list)
     description = Column(Text, nullable=True)
     meeting_point = Column(String(500), nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    source_url = Column(String(1024), nullable=True)
+    evidence = Column(JSON, default=list)
+    inventory_source = Column(String(50), default="catalog", nullable=False)
+    verification_status = Column(String(50), default="catalog_verified", nullable=False)
+    discovery_session_id = Column(String(64), nullable=True, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -150,6 +169,13 @@ class TransportOption(Base):
     currency = Column(String(10), default="INR")
     capacity = Column(Integer, default=4)
     features = Column(JSON, default=list)  # ["AC", "Luggage Carrier", "Heater"]
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    source_url = Column(String(1024), nullable=True)
+    evidence = Column(JSON, default=list)
+    inventory_source = Column(String(50), default="catalog", nullable=False)
+    verification_status = Column(String(50), default="catalog_verified", nullable=False)
+    discovery_session_id = Column(String(64), nullable=True, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -177,6 +203,7 @@ class Trip(Base):
     currency = Column(String(10), default="INR")
     traveler_count = Column(Integer, default=2)
     pace = Column(String(50), default="balanced")  # relaxed, balanced, packed
+    discovery_session_id = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

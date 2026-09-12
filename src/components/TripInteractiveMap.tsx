@@ -98,7 +98,7 @@ export const TripInteractiveMap: React.FC<TripInteractiveMapProps> = ({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    const initialCenter = mapData.center || [27.0410, 88.2663];
+    const initialCenter = mapData.center || [20.5937, 78.9629];
     const initialZoom = 12;
 
     const map = L.map(mapContainerRef.current, {
@@ -458,11 +458,11 @@ export const TripInteractiveMap: React.FC<TripInteractiveMapProps> = ({
           </span>
           <span className="text-stone-400">✈</span>
           <span className="bg-white px-2 py-0.5 rounded-md border border-stone-200 text-stone-800 font-semibold">
-            {trip.selected_transport?.transit_hub || 'Bagdogra Airport'}
+            {trip.selected_transport?.transit_hub || 'Transit'}
           </span>
           <span className="text-stone-400">🚗</span>
           <span className="bg-white px-2 py-0.5 rounded-md border border-stone-200 text-stone-800 font-semibold">
-            {trip.destination?.name || 'Darjeeling'}
+            {trip.destination?.name || 'Destination'}
           </span>
           {trip.selected_accommodation && (
             <>

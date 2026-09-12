@@ -46,6 +46,11 @@ class DestinationBase(BaseModel):
     is_featured: Optional[bool] = False
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    source_url: Optional[str] = None
+    evidence: Optional[List[Dict[str, Any]]] = []
+    inventory_source: Optional[str] = "catalog"
+    verification_status: Optional[str] = "catalog_verified"
+    discovery_session_id: Optional[str] = None
 
 class DestinationCreate(DestinationBase):
     pass
@@ -68,6 +73,13 @@ class HotelBase(BaseModel):
     amenities: Optional[List[str]] = []
     images: Optional[List[str]] = []
     description: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    source_url: Optional[str] = None
+    evidence: Optional[List[Dict[str, Any]]] = []
+    inventory_source: Optional[str] = "catalog"
+    verification_status: Optional[str] = "catalog_verified"
+    discovery_session_id: Optional[str] = None
     is_active: bool = True
 
 class HotelRead(HotelBase):
@@ -89,6 +101,13 @@ class ActivityBase(BaseModel):
     images: Optional[List[str]] = []
     description: Optional[str] = None
     meeting_point: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    source_url: Optional[str] = None
+    evidence: Optional[List[Dict[str, Any]]] = []
+    inventory_source: Optional[str] = "catalog"
+    verification_status: Optional[str] = "catalog_verified"
+    discovery_session_id: Optional[str] = None
     is_active: bool = True
 
 class ActivityRead(ActivityBase):
@@ -109,6 +128,13 @@ class TransportBase(BaseModel):
     currency: str = "INR"
     capacity: int = 4
     features: Optional[List[str]] = []
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    source_url: Optional[str] = None
+    evidence: Optional[List[Dict[str, Any]]] = []
+    inventory_source: Optional[str] = "catalog"
+    verification_status: Optional[str] = "catalog_verified"
+    discovery_session_id: Optional[str] = None
     is_active: bool = True
 
 class TransportRead(TransportBase):
@@ -295,6 +321,7 @@ class TripBase(BaseModel):
     currency: Optional[str] = "INR"
     traveler_count: Optional[int] = 2
     pace: Optional[str] = "balanced"
+    discovery_session_id: Optional[str] = None
 
 class TripCreate(TripBase):
     user_id: Optional[str] = None

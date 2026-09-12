@@ -835,6 +835,94 @@ Known remaining issues:
 - The SerpApi key travels in the outbound HTTPS query string per SerpApi's auth design; it is never stored or logged by the app, but verbose HTTP debug logging would echo request URLs.
 - Local live search needs both servers: FastAPI on `:8000` (holds `SERPAPI_API_KEY`) plus `npm run dev` on `:3000`. If FastAPI is down, search returns a clear 502 message instead of results.
 
+### 2026-09-11 Hybrid Destination Discovery Pipeline
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the FastAPI trip creation route, Research Agent/Gemini service, RecommendationEngine, persisted ItineraryGenerator, destination/hotel/activity/transport/trip models, Alembic migrations, frontend trip creation flow, and interactive map coordinate extraction.
+
+Changed:
+
+- Added scoped dynamic discovery metadata to destinations, hotels, activities, transport options, and trips: `inventory_source`, `verification_status`, `discovery_session_id`, plus source/evidence and coordinates where needed for selected itinerary entities.
+- Added Alembic revision `0002_dynamic_evidence` to persist the new metadata columns without changing existing seeded catalog rows.
+- Added `backend/dynamic_destination/`, which calls the existing Gemini research service for unknown destination inventory, normalizes candidates, and rejects candidates unless evidence explicitly supports both entity existence and coordinates. A bare source URL is not accepted as verification.
+- Updated `POST /api/trips` so known catalog destinations continue to use permanent catalog inventory, while unknown destination names can create a session-scoped discovered inventory slice before the canonical Trip is created.
+- Updated RecommendationEngine and ItineraryGenerator to reuse the existing recommendation/generation path for both permanent catalog inventory and trip-scoped discovered inventory.
+- Persisted selected entity coordinates/evidence into itinerary item `meta_data.ui`, and exposed destination discovery metadata in trip serialization.
+- Updated the frontend map utility to consume persisted entity coordinates from itinerary items and removed Darjeeling/Bagdogra-specific fallback text/coordinates from the interactive map path.
+- Added regression tests for existing catalog flow, Gujarat dynamic discovery, arbitrary unknown destinations, invalid hotel evidence, invalid activity evidence, invalid coordinates, invalid ranked IDs, and map coordinate metadata from selected itinerary entities.
+
+Files modified:
+
+- `backend/ai/gemini_service.py`
+- `backend/api/routes.py`
+- `backend/dynamic_destination/__init__.py`
+- `backend/dynamic_destination/service.py`
+- `backend/itinerary/generator.py`
+- `backend/models/models.py`
+- `backend/recommendation/engine.py`
+- `backend/schemas/schemas.py`
+- `database/migrations/versions/0002_dynamic_destination_evidence.py`
+- `src/components/TripInteractiveMap.tsx`
+- `src/utils/geoCoordinates.ts`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\dynamic_destination\\service.py backend\\api\\routes.py backend\\itinerary\\generator.py backend\\recommendation\\engine.py backend\\ai\\gemini_service.py backend\\models\\models.py backend\\schemas\\schemas.py tests\\test_backend.py`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (59 passed, 116 warnings).
+- `npm run lint`: passed.
+- Initial `npm run build` failed inside the sandbox with Vite/esbuild access denied while loading `vite.config.ts`; rerunning with approval passed and emitted the existing large-chunk warning.
+
+Known remaining issues:
+
+- Runtime quality for live unknown destinations depends on Gemini returning structured research candidates with evidence entries that explicitly support both existence and coordinates. If that verification fails, trip creation returns a clear 422/503 instead of substituting another destination or saving unsourced entities.
+
+### 2026-09-11 Catalog-Grounded Itinerary Persistence
+
+Inspected:
+
+- `AGENTS.md`, `README.md`, the AI Development Context / Change Log, FastAPI trip creation and AI itinerary routes, persisted itinerary generator, read-only CrewAI itinerary recommendation service, Gemini service fallback itinerary code, SQLAlchemy destination/hotel/activity/transport/itinerary models, seed data, frontend create-trip and itinerary rendering flow, and backend tests.
+- The configured database catalog contains Manali, Goa, Kerala, Rajasthan, and Kashmir. It does not contain a Gujarat destination, Gujarat hotels, Gujarat activities, or Gujarat transport options.
+
+Changed:
+
+- Added explicit `ItineraryGenerationError` handling to the persisted itinerary generator.
+- Made `ItineraryGenerator.generate_for_trip()` and `optimize_for_trip()` fail explicitly when a trip is missing, has no valid catalog destination, lacks required active catalog inventory, or receives recommendation IDs that do not validate against active destination-scoped catalog records.
+- Updated FastAPI `POST /api/trips` to resolve the requested destination to an actual catalog `Destination` record, preflight active hotel/activity/transport inventory before creating trip state, and remove newly-created trip records if catalog-grounded itinerary generation fails.
+- Updated FastAPI `POST /api/ai/generate-itinerary` so it requires `trip_id` and no longer returns an unpersisted free-form Gemini/fallback itinerary when no canonical trip exists.
+- Updated FastAPI `POST /api/trips/{trip_id}/optimize` to surface catalog-generation validation errors as HTTP 422.
+- Added regression tests for unsupported Gujarat trip creation, unknown destination IDs, no-trip AI itinerary generation, and invalid ranked catalog IDs.
+
+Files modified:
+
+- `backend/itinerary/generator.py`
+- `backend/api/routes.py`
+- `tests/test_backend.py`
+- `README.md`
+
+API/routes changed:
+
+- `POST /api/trips` now rejects unsupported destinations or incomplete catalog inventory before returning a generated itinerary.
+- `POST /api/ai/generate-itinerary` now requires `trip_id` for catalog-grounded generation.
+- `POST /api/trips/{trip_id}/optimize` now returns HTTP 422 for catalog validation/generation failures.
+
+Tests/checks performed:
+
+- `venv\\Scripts\\python.exe -m py_compile backend\\itinerary\\generator.py backend\\api\\routes.py tests\\test_backend.py`: passed.
+- `venv\\Scripts\\python.exe -m pytest tests\\test_backend.py -q`: passed (54 passed, 54 warnings).
+- Direct FastAPI `POST /api/trips` probe for Gujarat returned HTTP 422 with `A valid catalog destination is required`; trip count remained unchanged.
+- Initial `npm run lint` failed because local `node_modules` was missing already-declared React type packages. `npm install` was rerun with approval and restored the package tree.
+- `npm run lint`: passed.
+- Initial `npm run build` failed inside the sandbox with Vite/esbuild access denied while loading `vite.config.ts`.
+- `npm run build` rerun with approval: passed; Vite emitted its existing large-chunk warning.
+
+Known remaining issues:
+
+- Gujarat cannot produce a catalog-grounded itinerary because no Gujarat destination or Gujarat hotel/activity/transport catalog records exist in the database.
+- The frontend still allows users to type custom destinations; unsupported destinations are now rejected by the FastAPI trip creation route instead of being persisted with fabricated or mismatched itinerary inventory.
+
 ### 2026-09-08 Frontend Type Contract Corrections
 
 Inspected:

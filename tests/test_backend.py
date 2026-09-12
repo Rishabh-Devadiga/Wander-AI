@@ -1,9 +1,13 @@
 import json
 import os
+from copy import deepcopy
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 from backend.main import app
+from backend.ai.gemini_service import gemini_service
 from backend.database.connection import SessionLocal
 from backend.models.models import (
     Activity, Alert, Booking, ChangeHistory, Destination, Hotel, ItineraryItem, TransportOption, Trip,
@@ -34,7 +38,90 @@ client = TestClient(app)
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_database():
+    command.upgrade(Config("alembic.ini"), "head")
     run_seed()
+
+
+def _evidence(label="source"):
+    return [{"url": f"https://example.com/{label}", "label": label, "supports": ["existence", "coordinates"]}]
+
+
+def _dynamic_inventory(destination="Gujarat", activity_names=None):
+    names = activity_names or [
+        "Rann of Kutch",
+        "Statue of Unity",
+        "Gir National Park",
+        "Ahmedabad Heritage Walk",
+        "Somnath Temple",
+        "Dwarkadhish Temple",
+    ]
+    coords = [
+        (23.7337, 69.8597),
+        (21.8380, 73.7191),
+        (21.1243, 70.8242),
+        (23.0225, 72.5714),
+        (20.8880, 70.4012),
+        (22.2442, 68.9685),
+    ]
+    return {
+        "destination": {
+            "name": destination,
+            "country": "India",
+            "state_region": destination,
+            "description": f"Researched travel inventory for {destination}.",
+            "best_time_to_visit": "October to March",
+            "latitude": 22.2587,
+            "longitude": 71.1924,
+            "regions": ["western India"],
+            "evidence": _evidence(f"{destination.lower()}-destination"),
+        },
+        "activities": [
+            {
+                "name": name,
+                "category": "culture" if idx % 2 else "nature",
+                "area": name,
+                "description": f"Verified visit to {name}.",
+                "duration_hours": 3.0,
+                "price_per_person": 1000.0,
+                "currency": "INR",
+                "difficulty_level": "easy",
+                "latitude": coords[idx][0],
+                "longitude": coords[idx][1],
+                "evidence": _evidence(name.lower().replace(" ", "-")),
+            }
+            for idx, name in enumerate(names)
+        ],
+        "hotels": [
+            {
+                "name": "The House of MG",
+                "category": "boutique",
+                "address": "Lal Darwaja, Ahmedabad",
+                "description": "Verified Ahmedabad heritage hotel.",
+                "price_per_night": 6500.0,
+                "currency": "INR",
+                "rating": 4.5,
+                "latitude": 23.0265,
+                "longitude": 72.5812,
+                "evidence": _evidence("house-of-mg"),
+            }
+        ],
+        "transport_options": [
+            {
+                "name": "Ahmedabad regional private cab",
+                "type": "private_cab",
+                "route_from": "Ahmedabad",
+                "route_to": destination,
+                "duration_hours": 5.0,
+                "price": 12000.0,
+                "currency": "INR",
+                "capacity": 4,
+                "latitude": 23.0225,
+                "longitude": 72.5714,
+                "features": ["driver", "intercity"],
+                "evidence": _evidence("gujarat-cab"),
+            }
+        ],
+    }
 
 def test_health_endpoint():
     response = client.get("/api/health")
@@ -134,6 +221,198 @@ def test_trip_creation_and_retrieval():
     put_pref = client.put(f"/api/trips/{trip_id}/preferences", json={"budget_tier": "ultra_luxury", "interests": ["helicopter_tour"]})
     assert put_pref.status_code == 200
     assert put_pref.json()["budget_tier"] == "ultra_luxury"
+
+
+def test_trip_creation_uses_existing_catalog_without_dynamic_research(monkeypatch):
+    def fail_research(*args, **kwargs):
+        raise AssertionError("catalog destination should not invoke dynamic discovery")
+    monkeypatch.setattr(gemini_service, "discover_destination_inventory", fail_research)
+
+    dest_res = client.get("/api/destinations/manali")
+    manali_id = dest_res.json()["id"]
+    response = client.post("/api/trips", json={
+        "title": "Catalog Destination Flow",
+        "destination_id": manali_id,
+        "duration_days": 3,
+        "total_budget": 45000.0,
+        "currency": "INR",
+        "traveler_count": 2,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["destination"]["inventory_source"] == "catalog"
+    assert data["discovery_session_id"] is None
+
+
+def test_trip_creation_discovers_gujarat_without_permanent_catalog_pollution(monkeypatch):
+    db = SessionLocal()
+    before = db.query(Trip).count()
+    db.close()
+    monkeypatch.setattr(
+        gemini_service,
+        "discover_destination_inventory",
+        lambda context: _dynamic_inventory("Gujarat"),
+    )
+
+    payload = {
+        "title": "Gujarat Dynamic Trip",
+        "destination_name": "Gujarat",
+        "duration_days": 7,
+        "total_budget": 90000.0,
+        "currency": "INR",
+        "traveler_count": 2,
+        "preferences": {
+            "interests": ["Rann of Kutch", "Statue of Unity", "Gir National Park"],
+        },
+    }
+    response = client.post("/api/trips", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    titles = {item["title"] for item in data["itinerary"]}
+    assert {"Rann of Kutch", "Statue of Unity", "Gir National Park", "Ahmedabad Heritage Walk"} & titles
+    assert "The House of MG" in titles
+    assert data["destination"]["inventory_source"] == "discovered"
+    assert data["destination"]["verification_status"] == "verified_candidate"
+    assert data["discovery_session_id"]
+    assert all(
+        item.get("hotel_id") or item.get("activity_id") or item.get("transport_id")
+        for item in data["itinerary"]
+        if item["item_type"] in {"hotel", "activity", "transport"}
+    )
+    assert all(
+        "latitude" in item and "longitude" in item
+        for item in data["itinerary"]
+        if item["item_type"] in {"hotel", "activity", "transport"}
+    )
+
+    db = SessionLocal()
+    try:
+        assert db.query(Trip).count() == before + 1
+        assert db.query(Destination).filter(
+            Destination.name.ilike("Gujarat"),
+            Destination.inventory_source == "catalog",
+        ).count() == 0
+    finally:
+        db.close()
+
+
+def test_trip_creation_discovers_arbitrary_destination(monkeypatch):
+    inventory = _dynamic_inventory(
+        "Testland",
+        ["Museum Quarter", "Old Town Walk", "River Viewpoint", "Central Market"],
+    )
+    inventory["destination"]["latitude"] = 10.0
+    inventory["destination"]["longitude"] = 20.0
+    monkeypatch.setattr(
+        gemini_service,
+        "discover_destination_inventory",
+        lambda context: inventory,
+    )
+    response = client.post("/api/trips", json={
+        "title": "Arbitrary Dynamic Trip",
+        "destination_name": "Testland",
+        "duration_days": 4,
+        "total_budget": 70000.0,
+        "currency": "INR",
+        "traveler_count": 2,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["destination"]["name"] == "Testland"
+    assert data["destination"]["inventory_source"] == "discovered"
+
+
+def test_trip_creation_rejects_bare_source_url_hotel_without_persisting(monkeypatch):
+    inventory = deepcopy(_dynamic_inventory("Bare Url Place"))
+    inventory["hotels"][0]["evidence"] = [{"url": "https://example.com/hotel"}]
+    monkeypatch.setattr(
+        gemini_service,
+        "discover_destination_inventory",
+        lambda context: inventory,
+    )
+    db = SessionLocal()
+    before = db.query(Trip).count()
+    db.close()
+    response = client.post("/api/trips", json={
+        "title": "Invalid Hotel Evidence",
+        "destination_name": "Bare Url Place",
+        "duration_days": 3,
+        "total_budget": 70000.0,
+    })
+    assert response.status_code == 422
+    assert "source URL alone is insufficient" in response.json()["detail"]
+    db = SessionLocal()
+    try:
+        assert db.query(Trip).count() == before
+    finally:
+        db.close()
+
+
+def test_trip_creation_rejects_invalid_activity_without_persisting(monkeypatch):
+    inventory = deepcopy(_dynamic_inventory("Invalid Activity Place"))
+    inventory["activities"][0]["evidence"] = []
+    monkeypatch.setattr(
+        gemini_service,
+        "discover_destination_inventory",
+        lambda context: inventory,
+    )
+    response = client.post("/api/trips", json={
+        "title": "Invalid Activity Evidence",
+        "destination_name": "Invalid Activity Place",
+        "duration_days": 3,
+        "total_budget": 70000.0,
+    })
+    assert response.status_code == 422
+    assert "Research candidate evidence" in response.json()["detail"]
+
+
+def test_trip_creation_rejects_invalid_coordinates(monkeypatch):
+    inventory = deepcopy(_dynamic_inventory("Invalid Coordinate Place"))
+    inventory["activities"][0]["latitude"] = 123.0
+    monkeypatch.setattr(
+        gemini_service,
+        "discover_destination_inventory",
+        lambda context: inventory,
+    )
+    response = client.post("/api/trips", json={
+        "title": "Invalid Coordinate Trip",
+        "destination_name": "Invalid Coordinate Place",
+        "duration_days": 3,
+        "total_budget": 70000.0,
+    })
+    assert response.status_code == 422
+    assert "invalid latitude" in response.json()["detail"]
+
+
+def test_trip_creation_rejects_unknown_destination_id_without_persisting():
+    db = SessionLocal()
+    before = db.query(Trip).count()
+    db.close()
+
+    response = client.post("/api/trips", json={
+        "title": "Unknown Destination ID",
+        "destination_id": "dest-gujarat-missing",
+        "duration_days": 3,
+        "total_budget": 90000.0,
+    })
+    assert response.status_code == 422
+    assert "catalog destination" in response.json()["detail"]
+
+    db = SessionLocal()
+    try:
+        assert db.query(Trip).count() == before
+    finally:
+        db.close()
+
+
+def test_ai_generate_itinerary_requires_trip_id_for_catalog_grounding():
+    response = client.post("/api/ai/generate-itinerary", json={
+        "destination_id": "dest-gujarat-missing",
+        "duration_days": 4,
+        "preferences": {"destination": "Gujarat"},
+    })
+    assert response.status_code == 422
+    assert "trip_id is required" in response.json()["detail"]
 
 def test_ai_foundation_endpoints():
     # Chat
@@ -296,7 +575,7 @@ def test_itinerary_generator_consumes_ranked_catalog_without_duplicates(monkeypa
         def __init__(self, db):
             pass
 
-        def get_recommendations(self, destination_id, preferences):
+        def get_recommendations(self, destination_id, preferences, discovery_session_id=None):
             assert destination_id == "dest-manali-001"
             assert preferences["budget_tier"] == "budget"
             return {
@@ -369,6 +648,49 @@ def test_itinerary_generator_consumes_ranked_catalog_without_duplicates(monkeypa
         db.close()
 
 
+def test_itinerary_generator_rejects_invalid_ranked_catalog_ids(monkeypatch):
+    import backend.itinerary.generator as itinerary_generator
+
+    class InvalidRankedEngine:
+        def __init__(self, db):
+            pass
+
+        def get_recommendations(self, destination_id, preferences, discovery_session_id=None):
+            assert destination_id == "dest-manali-001"
+            return {
+                "ai_insights": None,
+                "recommended_hotels": [{"id": "htl-fictional-palace"}],
+                "recommended_activities": [{"id": "act-manali-004"}, {"id": "act-manali-003"}],
+                "recommended_transport": [{"id": "trn-manali-002"}],
+            }
+
+    monkeypatch.setattr(itinerary_generator, "RecommendationEngine", InvalidRankedEngine)
+    db = SessionLocal()
+    trip = None
+    try:
+        trip = Trip(
+            user_id="usr-alex-morgan-001",
+            destination_id="dest-manali-001",
+            title="Invalid Ranked ID Test",
+            duration_days=3,
+            total_budget=100000.0,
+            currency="INR",
+            traveler_count=2,
+        )
+        db.add(trip)
+        db.commit()
+
+        with pytest.raises(itinerary_generator.ItineraryGenerationError):
+            ItineraryGenerator(db).generate_for_trip(trip.id)
+        assert db.query(ItineraryItem).filter(ItineraryItem.trip_id == trip.id).count() == 0
+    finally:
+        if trip:
+            db.query(ItineraryItem).filter(ItineraryItem.trip_id == trip.id).delete()
+            db.query(Trip).filter(Trip.id == trip.id).delete()
+            db.commit()
+        db.close()
+
+
 def test_trip_optimizer_rebuilds_proposed_items_from_ranked_catalog(monkeypatch):
     import backend.itinerary.generator as itinerary_generator
 
@@ -376,7 +698,7 @@ def test_trip_optimizer_rebuilds_proposed_items_from_ranked_catalog(monkeypatch)
         def __init__(self, db):
             pass
 
-        def get_recommendations(self, destination_id, preferences):
+        def get_recommendations(self, destination_id, preferences, discovery_session_id=None):
             assert destination_id == "dest-manali-001"
             assert preferences["interests"] == ["culture"]
             return {
