@@ -2,6 +2,7 @@ import React from 'react';
 import { Check, Sparkles, Calendar, MapPin, Users, Clock, DollarSign, ArrowRight, SlidersHorizontal, Plus, Minus, IndianRupee } from 'lucide-react';
 import { SmartImage } from './SmartImage';
 import { getDestinationPhotos } from '../utils/imageCatalog';
+import { useLiveDestinationPhotos } from '../utils/livePhotos';
 import { parseBudget } from '../utils/validation';
 
 export interface ChecklistState {
@@ -142,6 +143,9 @@ export const InChatTripChecklist: React.FC<InChatTripChecklistProps> = ({
   );
 
   const photoSet = checklist.where_to ? getDestinationPhotos(checklist.where_to) : null;
+  // Live provider photo replaces the hardcoded thumbnail whenever available.
+  const livePhotos = useLiveDestinationPhotos(checklist.where_to);
+  const checklistHero = livePhotos.hero || photoSet?.hero;
 
   return (
     <div 
@@ -231,7 +235,7 @@ export const InChatTripChecklist: React.FC<InChatTripChecklistProps> = ({
                 {photoSet && (
                   <div className="mt-2 p-2 rounded-2xl bg-white/90 border border-purple-100/90 shadow-2xs flex items-center gap-3">
                     <SmartImage
-                      src={photoSet.hero}
+                      src={checklistHero}
                       alt={checklist.where_to}
                       className="w-16 h-12 rounded-xl object-cover"
                       containerClassName="w-16 h-12 rounded-xl shrink-0"

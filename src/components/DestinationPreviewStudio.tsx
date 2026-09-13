@@ -2,6 +2,7 @@ import React from 'react';
 import { Sparkles, MapPin, Compass, Navigation, Bed, Sun, ShieldCheck, ArrowRight, Calendar, SlidersHorizontal, IndianRupee, Plus, Minus } from 'lucide-react';
 import { SmartImage } from './SmartImage';
 import { getDestinationPhotos } from '../utils/imageCatalog';
+import { useLiveDestinationPhotos } from '../utils/livePhotos';
 import { ChecklistState } from './InChatTripChecklist';
 import { parseBudget } from '../utils/validation';
 
@@ -20,6 +21,16 @@ export const DestinationPreviewStudio: React.FC<DestinationPreviewStudioProps> =
 }) => {
   const destName = checklist.where_to || 'Uttar Pradesh';
   const photoSet = getDestinationPhotos(destName);
+
+  // Live provider photos (SerpApi via backend). The hardcoded catalog above
+  // is only the loading/error fallback -- displayed images come from the API
+  // whenever it returns real photos (see src/utils/livePhotos.ts).
+  const live = useLiveDestinationPhotos(destName);
+
+  const heroSrc = live.hero || photoSet.hero;
+  const highlightSrcs = [0, 1, 2].map(
+    (idx) => live.highlights[idx] || photoSet.gallery[idx] || photoSet.hero,
+  );
 
   // Extract current numerical budget
   const currentBudgetValue = React.useMemo(() => {
@@ -64,7 +75,7 @@ export const DestinationPreviewStudio: React.FC<DestinationPreviewStudioProps> =
         <div className="relative rounded-3xl overflow-hidden shadow-lg border border-stone-200/70 group">
           <div className="h-64 sm:h-72 w-full relative">
             <SmartImage
-              src={photoSet.hero}
+              src={heroSrc}
               alt={destName}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
               containerClassName="w-full h-full"
@@ -105,7 +116,7 @@ export const DestinationPreviewStudio: React.FC<DestinationPreviewStudioProps> =
           </div>
 
           <div className="grid grid-cols-3 gap-2.5">
-            {photoSet.gallery.slice(0, 3).map((photoUrl, idx) => (
+            {highlightSrcs.map((photoUrl, idx) => (
               <div 
                 key={idx} 
                 className="relative rounded-2xl overflow-hidden h-24 sm:h-28 shadow-2xs border border-stone-200/80 group"

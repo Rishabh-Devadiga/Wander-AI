@@ -666,9 +666,26 @@ export const TourFlowApi = {
     return await res.json();
   },
 
+  // Live place photos (SerpApi Google Images via backend; key never reaches browser).
+  async getPlaceImages(params: {
+    location: string;
+    destination?: string;
+    count?: number;
+  }): Promise<{ location: string; image_url: string | null; images: string[]; source: string }> {
+    const query = new URLSearchParams();
+    query.set('location', params.location);
+    if (params.destination) query.set('destination', params.destination);
+    if (params.count) query.set('count', String(params.count));
+    const res = await fetch(`${API_BASE}/places/image?${query.toString()}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Place image lookup failed' }));
+      throw new Error(err.detail || 'Place image lookup failed');
+    }
+    return await res.json();
+  },
+
   // Live restaurant search (SerpApi Google Maps via backend; key never reaches browser).
-  async searchRestaurants(params: {
-    destination: string;
+  async searchRestaurants(params: {    destination: string;
     meal_type?: 'breakfast' | 'brunch' | 'lunch' | 'dinner';
     cuisine?: string;
     latitude?: number;

@@ -29,12 +29,72 @@ class SerpApiImageError(Exception):
     """Raised when the SerpApi image request fails or returns unusable data."""
 
 
-_image_cache: Dict[str, Optional[str]] = {}
+# Hosts that never yield displayable photos: watermarked stock comps and
+# crawler links that do not hotlink reliably. Entries from these hosts are
+# skipped (not merely deprioritized) so every returned URL is showable.
+_BLOCKED_IMAGE_HOSTS = (
+    "alamy",
+    "dreamstime",
+    "shutterstock",
+    "gettyimages",
+    "istockphoto",
+    "123rf",
+    "depositphotos",
+    "fbsbx",
+    "lookaside",
+    "ytimg.com",
+)
+
+
+def _host_blocked(url: str) -> bool:
+    host = url.casefold()
+    return any(blocked in host for blocked in _BLOCKED_IMAGE_HOSTS)
+
+
+# URL path fragments that indicate schematics rather than photographs
+# (route maps, diagrams, timetables, logos).
+_BLOCKED_URL_PATTERNS = (
+    "route_map",
+    "routemap",
+    "locator_map",
+    "locator-map",
+    "diagram",
+    "flowchart",
+    "timetable",
+    "/logo",
+    "logo.",
+)
+
+
+def _url_blocked(url: str) -> bool:
+    lowered = url.casefold()
+    return _host_blocked(url) or any(pattern in lowered for pattern in _BLOCKED_URL_PATTERNS)
+
+
+# Result titles that indicate non-photographs (maps, diagrams, timetables,
+# logos). These are skipped so cards show real photos, not schematics.
+_NON_PHOTO_TITLE_PATTERNS = (
+    "route map",
+    "timetable",
+    "time table",
+    "diagram",
+    "flowchart",
+    "logo",
+    "icon pack",
+)
+
+
+def _title_blocked(title: str) -> bool:
+    lowered = (title or "").casefold()
+    return any(pattern in lowered for pattern in _NON_PHOTO_TITLE_PATTERNS)
+
+
+_images_cache: Dict[str, List[str]] = {}
 
 
 def clear_image_cache() -> None:
     """Clear the in-memory image cache (used by tests)."""
-    _image_cache.clear()
+    _images_cache.clear()
 
 
 def _http_get(url: str, params: Dict[str, Any], timeout_s: float) -> httpx.Response:
@@ -51,14 +111,20 @@ def _usable_url(value: Any) -> Optional[str]:
 
 
 def normalize_image_result(item: Any) -> Optional[Dict[str, str]]:
-    """Normalize one ``images_results`` entry to {title, image_url}; None skips."""
+    """Normalize one ``images_results`` entry to {title, image_url}; None skips.
+
+    Skips records without a usable URL and URLs on blocked (watermarked or
+    non-hotlinkable) hosts.
+    """
     if not isinstance(item, dict):
         return None
     image_url = _usable_url(item.get("original")) or _usable_url(item.get("thumbnail"))
-    if image_url is None:
+    if image_url is None or _url_blocked(image_url):
         return None
     title = item.get("title")
     title = str(title).strip() if title else ""
+    if _title_blocked(title):
+        return None
     return {"title": title, "image_url": image_url}
 
 
@@ -129,21 +195,48 @@ def get_real_image_for_location(
     Cached per normalized query; never raises (provider failures yield None so
     callers keep the existing catalog image instead of a fabricated one).
     """
+    images = get_real_images_for_location(
+        location, destination, api_key, base_url, timeout_s, count=1,
+    )
+    return images[0] if images else None
+
+
+def get_real_images_for_location(
+    location: str,
+    destination: Optional[str] = None,
+    api_key: str = "",
+    base_url: str = "https://serpapi.com",
+    timeout_s: float = 20.0,
+    count: int = 1,
+) -> List[str]:
+    """Return up to ``count`` distinct real photo URLs (relevance order).
+
+    One provider call regardless of count; cached per normalized query+count;
+    never raises (failures yield [] so callers fall back to catalog images).
+    """
     query = (location or "").strip()
     if not query:
-        return None
-    key = f"{query.casefold()}|{(destination or '').strip().casefold()}"
-    if key in _image_cache:
-        return _image_cache[key]
+        return []
+    limit = max(1, min(int(count or 1), 6))
+    key = f"{query.casefold()}|{(destination or '').strip().casefold()}|{limit}"
+    if key in _images_cache:
+        return list(_images_cache[key])
     try:
         results = search_serpapi_images(
             api_key, base_url, location=query, destination=destination,
-            timeout_s=timeout_s,
+            timeout_s=timeout_s, max_results=max(limit, 5),
         )
     except Exception as exc:
+        # Never cache failures: a transient provider error (e.g. rate limit)
+        # must not poison the key -- the next trip retries live.
         logger.warning("Real image lookup failed for %r: %s", query, exc)
-        _image_cache[key] = None
-        return None
-    image_url = results[0]["image_url"] if results else None
-    _image_cache[key] = image_url
-    return image_url
+        return []
+    seen: List[str] = []
+    for result in results:
+        url = result["image_url"]
+        if url not in seen:
+            seen.append(url)
+        if len(seen) >= limit:
+            break
+    _images_cache[key] = seen
+    return list(seen)
