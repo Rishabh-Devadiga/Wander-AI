@@ -159,10 +159,11 @@ class PlacesLiveResponse(BaseModel):
     source: str = "overpass+commons"
 
 
-# Real photo for one location (SerpApi Google Images only, never fabricated)
+# Real photos for one location (SerpApi Google Images only, never fabricated)
 class PlaceImageResponse(BaseModel):
     location: str
     image_url: Optional[str] = None
+    images: List[str] = Field(default_factory=list)
     source: str = "serpapi_images"
 
 

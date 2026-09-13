@@ -2491,11 +2491,34 @@ def test_place_image_returns_real_provider_photo(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["image_url"] == "https://upload.wikimedia.org/real-garden.jpg"
+    assert body["images"] == ["https://upload.wikimedia.org/real-garden.jpg"]
     assert body["source"] == "serpapi_images"
     assert body["location"] == "Nishat Bagh"
     assert calls["params"]["engine"] == "google_images"
     assert "Nishat Bagh" in calls["params"]["q"] and "Kashmir" in calls["params"]["q"]
     assert "api_key" not in str(calls["url"])
+
+
+def test_place_image_count_returns_distinct_photos_in_one_call(monkeypatch):
+    calls = _mock_place_images(monkeypatch, {"images_results": [
+        _serpapi_image(title="Howrah Bridge", original="https://example.test/howrah.jpg"),
+        _serpapi_image(title="Victoria Memorial",
+                       original="https://example.test/victoria.jpg"),
+        _serpapi_image(title="Howrah Bridge duplicate",
+                       original="https://example.test/howrah.jpg"),
+        _serpapi_image(title="Park Street", original="https://example.test/park.jpg"),
+    ]})
+    response = client.get("/api/places/image",
+                          params={"location": "Kolkata", "count": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["images"] == ["https://example.test/howrah.jpg",
+                              "https://example.test/victoria.jpg",
+                              "https://example.test/park.jpg"]
+    assert body["image_url"] == body["images"][0]
+    assert calls.get("count", 0) == 1
+    assert client.get("/api/places/image",
+                      params={"location": "Kolkata", "count": 99}).status_code == 422
 
 
 def test_place_image_skips_unusable_records_and_empty_results(monkeypatch):
@@ -2516,6 +2539,25 @@ def test_place_image_skips_unusable_records_and_empty_results(monkeypatch):
     assert response.json()["image_url"] is None
     assert response.json()["source"] == "none"
     assert client.get("/api/places/image").status_code == 422
+
+
+def test_place_image_skips_watermarked_and_unreliable_hosts(monkeypatch):
+    _mock_place_images(monkeypatch, {"images_results": [
+        _serpapi_image(title="Watermarked", original="https://c8.alamy.com/comp/watermarked.jpg"),
+        _serpapi_image(title="Crawler link",
+                       original="https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=1",
+                       thumbnail=None),
+        _serpapi_image(title="Flight video still",
+                       original="https://i.ytimg.com/vi/abc/maxresdefault.jpg",
+                       thumbnail=None),
+        _serpapi_image(title="Express route map", original="https://example.test/map.png"),
+        _serpapi_image(title="Line overview",
+                       original="https://upload.wikimedia.org/line_Route_map.png"),
+        _serpapi_image(title="Real Palace", original="https://example.test/palace.jpg"),
+    ]})
+    response = client.get("/api/places/image", params={"location": "Palace"})
+    assert response.status_code == 200
+    assert response.json()["image_url"] == "https://example.test/palace.jpg"
 
 
 def test_place_image_error_paths_and_missing_key(monkeypatch):
@@ -2560,6 +2602,28 @@ def test_place_image_deduplicates_repeated_locations(monkeypatch):
     assert first.status_code == 200 and second.status_code == 200
     assert first.json()["image_url"] == "https://upload.wikimedia.org/real-garden.jpg"
     assert calls.get("count", 0) == 1
+
+
+def test_place_image_failure_is_not_cached(monkeypatch):
+    import httpx
+    import backend.images.service as images_service
+
+    images_service.clear_image_cache()
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "test-serpapi-key")
+    calls = {"count": 0}
+
+    def flaky(url, params, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.ConnectError("transient")
+        return _FakeSerpApiResponse({"images_results": [_serpapi_image()]})
+
+    monkeypatch.setattr(images_service, "_http_get", flaky)
+    params = {"location": "Dal Lake", "destination": "Kashmir"}
+    assert client.get("/api/places/image", params=params).json()["image_url"] is None
+    retry = client.get("/api/places/image", params=params)
+    assert retry.json()["image_url"] == "https://upload.wikimedia.org/real-garden.jpg"
+    assert calls["count"] == 2
 
 
 def test_no_hardcoded_image_urls_in_images_service():

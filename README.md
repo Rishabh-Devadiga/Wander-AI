@@ -737,6 +737,139 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-13 Transport Photo Rollout Fix (Stale Server + Failure Cache)
+
+Inspected:
+
+- Report of Vande Bharat / station-taxi cards still showing the desert-van stock photo after the transport-photo change. Verified via `GET /api/trips`: transport items had stock URLs with no `image_source` mark while sibling activity/meal items in the same trips had `serpapi` marks.
+
+Changed:
+
+- Root causes found: (1) the running `npm run dev` predated the transport-photo edit (`server.ts` mtime newer than the `tsx` process start), so the code never executed for those trips; old trips keep old photos by design. (2) `backend/images/service.py` cached provider failures, so one transient SerpApi error (e.g. rate limit during burst trip generation) poisoned the key for the process lifetime — failures are no longer cached, only successes; the next trip retries live.
+- Added a permanent one-line server-side `console.error('[live-images] NO PHOTO ...')` observability log for items that keep fallback images (temporary file logging used during diagnosis was removed, plus the unused `fs` import).
+- Restarted FastAPI and Express onto the final code and deleted all verification trips.
+
+Files modified:
+
+- `backend/images/service.py`
+- `server.ts`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (95 passed, 149 warnings), including a new failure-is-not-cached test (transient error → null, retry → real photo, provider called twice).
+- `npm.cmd run lint` (`tsc --noEmit`): passed. (Build already verified for these paths; no UI change in this entry.)
+- `git diff --check`: clean (see below).
+- Final acceptance on restarted servers: created + deleted a 2-day Kashmir trip — all 3 transport items (IndiGo flight, airport chauffeur, checkout transfer) carry `image_source=serpapi` Delhi–Srinagar flight photos; activity/sightseeing/meal/leisure all real (klook, tripadvisor, googleusercontent, travanya). Previously-failing souvenir-bazaar query now resolves, confirming the transient-failure diagnosis.
+
+Known remaining issues:
+
+- Trips generated before this rollout keep their stock photos; only newly generated trips get live transport photos. Hotel card photos still use the catalog.
+
+### 2026-09-13 Mode-Correct Transport Photos + Showcase Hook Sharing
+
+Inspected:
+
+- Flight/train card photos: `getActivityPhoto()` in `src/utils/imageCatalog.ts` mapped transfer/airport/train/drive ALL to one desert-van stock URL, rendered by itinerary cards (`item.image_url || getActivityPhoto(...)` in `AIChatConsole.tsx`). Checklist destination thumbnail (`InChatTripChecklist.tsx`) also used the hardcoded catalog hero.
+
+Changed:
+
+- `applyRealImagesToActivities` in `server.ts` now also covers `transport` items with mode-aware queries built from the trip's own route strings (`transportModeOf`/`transportImageQuery`): flights ask for airplanes on the route, trains for trains, buses for coaches, cabs for highway/road — a flight can never receive a train-station photo again. Origin threads through from trip params.
+- Shared `useLiveDestinationPhotos()` hook (`src/utils/livePhotos.ts`, session-cached, API-only) now feeds both `DestinationPreviewStudio` (refactored onto it, same behavior) and the `InChatTripChecklist` destination thumbnail.
+- Extended photo suitability filtering in `backend/images/service.py`: `ytimg.com` video stills join the blocked hosts, plus title patterns (`route map`, `timetable`, `diagram`, `logo`, …) and URL patterns (`route_map`, `locator_map`, `diagram`, `timetable`, logo paths) so schematics never reach cards. Verified effect: a Wikimedia Delhi–Howrah route map no longer tops train results.
+
+Files modified:
+
+- `server.ts`
+- `src/utils/livePhotos.ts` (created)
+- `src/components/DestinationPreviewStudio.tsx`
+- `src/components/InChatTripChecklist.tsx`
+- `backend/images/service.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (94 passed, 149 warnings), including extended blocked-host/title/URL-pattern tests.
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean (see below).
+- Live verification after restarting FastAPI (Delhi→Kolkata, 3 SerpApi credits): flight → Air India Dreamliner + IndiGo photos; train → Delhi–Kolkata train + Rajdhani photos; bus → Delhi–Kolkata smartbus photos.
+- Restart note: `npm run dev` (plain `tsx server.ts`, no watch) still serves stale code, so all Express-side changes activate after restarting it; FastAPI was restarted and serves the current contract.
+
+Known remaining issues:
+
+- Transport photo enrichment adds roughly one SerpApi image search per unique transport title per trip (cached); hotel card photos still use the catalog.
+
+### 2026-09-13 Live Showcase Photos (DestinationPreviewStudio via API)
+
+Inspected:
+
+- `src/components/DestinationPreviewStudio.tsx` rendered `getDestinationPhotos(destName)` (hardcoded `imageCatalog.ts`, generic VW-van fallback for uncatalogued places like Uttar Pradesh) for the hero + three highlight cards (Heritage Wonders / Sacred Ghats / Royal Palaces). No database or API involved.
+
+Changed:
+
+- The studio now loads all four photos from live `GET /api/places/image` (SerpApi via backend; key never in the browser): hero query `"<dest> tourism"`, highlights `heritage monument`, `ghats riverside`, `palace` scoped to the destination. Hardcoded catalog remains only as the loading/error fallback; nothing is read from the database and no image URL is hardcoded. Results session-cache per destination (max 4 provider calls per destination per session; backend process cache dedupes further).
+- Added `TourFlowApi.getPlaceImages()` to `src/services/api.ts`.
+- Added a blocked-host filter in `backend/images/service.py` (`alamy`, `dreamstime`, `shutterstock`, `gettyimages`, `istockphoto`, `123rf`, `depositphotos`, `fbsbx`, `lookaside`): watermarked stock comps and non-hotlinkable crawler links are skipped so every returned URL is displayable. This benefits all image consumers (activities, options, heroes).
+
+Files modified:
+
+- `src/components/DestinationPreviewStudio.tsx`
+- `src/services/api.ts`
+- `backend/images/service.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (94 passed, 149 warnings), including a new blocked-host test (alamy/fbsbx skipped, real host returned).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean (see below).
+- Live verification after restarting FastAPI, exact showcase queries for Uttar Pradesh (4 SerpApi credits): hero → Bara Imambara Lucknow photo; Heritage Wonders → UP heritage photo (trawell.in); Sacred Ghats → riverside ghats photo from the official kashi.gov.in site; Royal Palaces → Agra Fort (Tripadvisor CDN).
+- Restart note: `npm run dev` (plain `tsx server.ts`, no watch) still serves stale code, so the studio change activates after restarting it; FastAPI was restarted and serves the current contract.
+
+Known remaining issues:
+
+- For destinations with no relevant provider photos, cards fall back to the hardcoded catalog images.
+
+### 2026-09-13 Real Destination Heroes + Option-Card Photos
+
+Inspected:
+
+- Trip header hero + PHOTOS strip (`getOrCreateDestination` generic fallback: desert-van stock hero for any destination outside the hardcoded catalog, e.g. Kolkata) and option cards (`generateProceduralOptions` in `src/server/possibleOptionsEngine.ts` with fixed stock: waterfall for "Nature Sanctuary", snowy Himalayas for "Iconic Landmark" — mismatched for Kolkata). Both served via Express `GET /api/possible-options` and `GET /api/activities`.
+
+Changed:
+
+- Extended `GET /api/places/image` with `count` (1–6, default 1): returns up to `count` distinct relevance-ranked `images[]` from a single SerpApi call (`image_url` kept as the first for compatibility) via new `get_real_images_for_location()`; `get_real_image_for_location()` now wraps it.
+- Express `buildCanonicalTripAsync` runs `applyRealDestinationPhotos(destObj)` concurrently with live enrichment: when the hero is the generic fallback (detected by the `photo-1469854523086` marker), one provider call replaces hero + gallery with up to 5 real destination photos. Curated catalog heroes are hand-picked and left alone.
+- `GET /api/possible-options` and `GET /api/activities` (now async) run `applyRealImagesToOptions`: only procedural `opt-dyn-*` options get real per-title photos (bounded concurrency of 4, per-title cache + backend cache); curated catalog options keep hand-picked images. Titles, costs, ordering untouched; failures keep stock images.
+
+Files modified:
+
+- `backend/images/service.py`
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `server.ts`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (93 passed, 149 warnings), including a new count test (3 distinct photos, dedup, single provider call, count>6 rejected with 422).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean (see below).
+- Live verification after restarting FastAPI: `GET /api/places/image?location=Kolkata&count=5` returned HTTP 200 with 5 real Kolkata photos (North Kolkata, Howrah Bridge via Incredible India, Victoria Memorial, Wikimedia Kolkata, Nizam's) from 1 SerpApi credit.
+- Restart note: `npm run dev` (plain `tsx server.ts`, no watch) still serves stale code, so the new Express proxy/enrichment/routes activate after restarting it; FastAPI was restarted and serves the new contract.
+
+Known remaining issues:
+
+- Existing trips keep their old fallback heroes; new trips get real ones. Curated-catalog destination heroes and hotel/transport card photos still use the Unsplash catalog.
+- Each new trip/tray open spends roughly one SerpApi image search per unique procedural option title (cached per process) plus one for the fallback-destination hero/gallery.
+
 ### 2026-09-13 Real Activity Photos (SerpApi Google Images)
 
 Inspected:

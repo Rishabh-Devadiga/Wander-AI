@@ -1608,6 +1608,35 @@ function markRealImage(item: any, source: 'commons' | 'serpapi'): void {
   item.meta_data = { ...(item.meta_data || {}), image_source: source };
 }
 
+function transportModeOf(item: any): 'flight' | 'train' | 'bus' | 'cab' | null {
+  const text = `${item?.title || ''} ${item?.description || ''}`.toLowerCase();
+  if (/flight|airplane|airport|indigo|air india|spicejet|vistara/.test(text)) return 'flight';
+  if (/train|railway|vande bharat|rajdhani|irctc|station/.test(text)) return 'train';
+  if (/volvo|bus\b|redbus/.test(text)) return 'bus';
+  if (/cab|suv|taxi|chauffeur|car|drive|transfer/.test(text)) return 'cab';
+  return null;
+}
+
+function transportImageQuery(item: any, origin: string | null | undefined, destName: string): string {
+  // Mode-aware photo query built from the trip's own route strings (never
+  // hardcoded venues): a flight asks for airplanes on that route, a train
+  // asks for trains, etc.
+  const from = (origin || '').trim();
+  const route = from ? `${from} to ${destName}` : destName;
+  switch (transportModeOf(item)) {
+    case 'flight':
+      return `passenger airplane flight ${route}`;
+    case 'train':
+      return `passenger train railway ${route}`;
+    case 'bus':
+      return `coach bus highway ${route}`;
+    case 'cab':
+      return `road trip highway car ${route}`;
+    default:
+      return `${String(item.title || 'travel').trim()}, ${destName}`;
+  }
+}
+
 function hasRealImage(item: any): boolean {
   // Provider-backed photos only: SerpApi business/place photos, Commons
   // geotagged thumbnails, or an explicitly marked source. Curated Unsplash
@@ -1622,49 +1651,118 @@ function hasRealImage(item: any): boolean {
 async function fetchRealImageForActivity(params: {
   title: string; destName: string;
 }): Promise<string | null> {
-  // One real relevance-ranked provider photo for an activity title. Null when
-  // the provider has nothing (caller keeps the existing catalog image).
+  const images = await fetchRealImages(params.title, params.destName, 1);
+  return images[0] || null;
+}
+
+async function fetchRealImages(
+  location: string,
+  destName: string,
+  count: number,
+): Promise<string[]> {
+  // Relevance-ranked real provider photos for any location query. Empty when
+  // the provider has nothing (callers keep catalog images).
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const timer = setTimeout(() => ctrl.abort(), 10000);
     const base = getFastApiBase();
     const query = new URLSearchParams();
-    query.set('location', params.title);
-    query.set('destination', params.destName);
+    query.set('location', location);
+    query.set('destination', destName);
+    query.set('count', String(Math.max(1, Math.min(count || 1, 6))));
     const res = await fetch(`${base}/api/places/image?${query.toString()}`, { signal: ctrl.signal });
     clearTimeout(timer);
-    if (!res.ok) return null;
+    if (!res.ok) return [];
     const body = await res.json().catch(() => null);
-    const url = body?.image_url;
-    return typeof url === 'string' && url.startsWith('https://') ? url : null;
+    const images = Array.isArray(body?.images) ? body.images : [];
+    return images.filter((u: any) => typeof u === 'string' && u.startsWith('https://'));
   } catch (err) {
-    return null;
+    return [];
   }
 }
 
-async function applyRealImagesToActivities(itinerary: any[], destName: string): Promise<void> {
+// Stock hero used by getOrCreateDestination for places outside the curated
+// catalog. Only these generic-fallback destinations get live hero/gallery
+// replacement; curated catalog heroes are hand-picked and left alone.
+const GENERIC_FALLBACK_HERO = 'photo-1469854523086-cc02fe5d8800';
+
+async function applyRealDestinationPhotos(destObj: any): Promise<void> {
+  if (!destObj || typeof destObj.hero_image_url !== 'string') return;
+  if (!destObj.hero_image_url.includes(GENERIC_FALLBACK_HERO)) return;
+  // One provider call yields hero + gallery: real photos of the destination.
+  const images = await fetchRealImages(destObj.name, destObj.name, 5);
+  if (images.length === 0) return;
+  destObj.hero_image_url = images[0];
+  destObj.gallery_images = images.slice(1);
+}
+
+async function applyRealImagesToOptions(options: any[], destName: string): Promise<void> {
+  if (!options) return;
+  // Procedural fallback options (opt-dyn-*) carry fixed stock photos that
+  // mismatch novel destinations (e.g. snowy peaks for Kolkata). Replace with
+  // real per-option photos; curated catalog options keep hand-picked images.
+  // Bounded concurrency (4) plus backend per-query cache limit provider calls.
+  const targets = options.filter(
+    (o) => o && typeof o.id === 'string' && o.id.startsWith('opt-dyn-') && typeof o.title === 'string' && o.title.trim(),
+  );
+  if (targets.length === 0) return;
+  const cache = new Map<string, Promise<string | null>>();
+  const lookup = (opt: any): Promise<string | null> => {
+    const key = opt.title.trim().toLowerCase();
+    let pending = cache.get(key);
+    if (!pending) {
+      pending = fetchRealImageForActivity({ title: opt.title, destName });
+      cache.set(key, pending);
+    }
+    return pending;
+  };
+  for (let batch = 0; batch < targets.length; batch += 4) {
+    const slice = targets.slice(batch, batch + 4);
+    const settled = await Promise.allSettled(slice.map((opt) => lookup(opt)));
+    settled.forEach((result, idx) => {
+      if (result.status !== 'fulfilled' || !result.value) return;
+      slice[idx].image_url = result.value;
+    });
+  }
+}
+
+async function applyRealImagesToActivities(
+  itinerary: any[],
+  destName: string,
+  opts?: { origin?: string | null },
+): Promise<void> {
   if (!itinerary) return;
   // Replace curated stock photos on activity/sightseeing/leisure/meal items
-  // with real provider photos. Items already carrying a real image
-  // are skipped; failures keep the existing image. Bounded concurrency (4)
-  // plus a shared per-location cache keep trip generation fast.
+  // with real provider photos. Transport items (flights, trains, buses,
+  // cabs) get mode-aware queries so a flight never shows a train station and
+  // vice versa. Items already carrying a real image are skipped; failures
+  // keep the existing image. Bounded concurrency (4) plus a shared
+  // per-location cache keep trip generation fast.
   const targets = itinerary.filter(
     (i) =>
       (i.item_type === 'activity' ||
         i.item_type === 'sightseeing' ||
         i.item_type === 'leisure' ||
-        i.item_type === 'meal') &&
+        i.item_type === 'meal' ||
+        i.item_type === 'transport') &&
       !i.is_disabled &&
       !hasRealImage(i),
   );
   if (targets.length === 0) return;
   const cache = new Map<string, Promise<string | null>>();
-  const keyOf = (item: any) => `${String(item.title || '').trim().toLowerCase()}`;
+  const queryFor = (item: any): { title: string; destName: string } => {
+    if (item.item_type === 'transport') {
+      return { title: transportImageQuery(item, opts?.origin, destName), destName };
+    }
+    return { title: String(item.title || destName), destName };
+  };
+  const keyOf = (item: any) => `${item.item_type || ''}||${queryFor(item).title.trim().toLowerCase()}`;
   const lookup = (item: any): Promise<string | null> => {
     const key = keyOf(item);
     let pending = cache.get(key);
     if (!pending) {
-      pending = fetchRealImageForActivity({ title: String(item.title || destName), destName });
+      const q = queryFor(item);
+      pending = fetchRealImageForActivity({ title: q.title, destName: q.destName });
       cache.set(key, pending);
     }
     return pending;
@@ -1673,7 +1771,13 @@ async function applyRealImagesToActivities(itinerary: any[], destName: string): 
     const slice = targets.slice(batch, batch + 4);
     const settled = await Promise.allSettled(slice.map((item) => lookup(item)));
     settled.forEach((result, idx) => {
-      if (result.status !== 'fulfilled' || !result.value) return;
+      if (result.status !== 'fulfilled' || !result.value) {
+        console.error(
+          `[live-images] NO PHOTO item_type=${slice[idx].item_type} ` +
+            `title=${String(slice[idx].title || '').slice(0, 80)}`,
+        );
+        return;
+      }
       slice[idx].image_url = result.value;
       markRealImage(slice[idx], 'serpapi');
     });
@@ -2061,11 +2165,16 @@ async function buildCanonicalTripAsync(params: {
 
   // 2b. Live enrichment (best-effort): real SerpApi hotels replace the static
   // selection when available; costs downstream recompute from live prices.
-  const liveEnrichment = await fetchLiveTripEnrichment({
-    destination: destObj.name,
-    checkIn: startDate.slice(0, 10), checkOut: endDate.slice(0, 10),
-    travelers: travelersCount, currency,
-  });
+  // Destination hero/gallery replacement runs concurrently (generic-fallback
+  // destinations only; one provider call for up to 5 real photos).
+  const [liveEnrichment] = await Promise.all([
+    fetchLiveTripEnrichment({
+      destination: destObj.name,
+      checkIn: startDate.slice(0, 10), checkOut: endDate.slice(0, 10),
+      travelers: travelersCount, currency,
+    }),
+    applyRealDestinationPhotos(destObj),
+  ]);
   let resolvedAccommodation = selectedAccommodation;
   let resolvedAccommodationAlternatives = accommodationAlternatives;
   if (liveEnrichment.hotels.length > 0) {
@@ -2122,9 +2231,11 @@ async function buildCanonicalTripAsync(params: {
     cuisine: params.preferences?.cuisine || null,
   });
 
-  // 3a3. Swap remaining curated stock photos for real geotagged provider
-  // photos (best-effort; items keep their catalog image when unavailable).
-  await applyRealImagesToActivities(itinerary, destObj.name);
+  // 3a3. Swap remaining curated stock photos for real provider photos
+  // (best-effort; items keep their catalog image when unavailable).
+  await applyRealImagesToActivities(itinerary, destObj.name, {
+    origin: params.origin || 'Mumbai',
+  });
 
   // 3b. Compute Multi-Hotel 5km Radius Split Allocations
   const finalDailyAccommodations = resolveDailySplitAccommodations({
@@ -2349,7 +2460,7 @@ app.get('/api/hotels', (req: Request, res: Response) => {
 });
 
 // Dynamic Activities Catalog Endpoint
-app.get('/api/activities', (req: Request, res: Response) => {
+app.get('/api/activities', async (req: Request, res: Response) => {
   const destIdOrName = (req.query.destination_id as string) || (req.query.destination as string) || '';
   const category = (req.query.category as string) || '';
   let dest = 'Darjeeling';
@@ -2359,6 +2470,7 @@ app.get('/api/activities', (req: Request, res: Response) => {
   }
 
   const rawOptions = getPossibleOptionsForDestination(dest);
+  await applyRealImagesToOptions(rawOptions, dest);
   let activitiesList = rawOptions.map((opt, idx) => ({
     id: opt.id,
     destination_id: destIdOrName || 'dest-all',
@@ -3900,9 +4012,10 @@ app.post('/api/trips/:id/remove-day-leg', (req: Request, res: Response) => {
 });
 
 // Dynamic Possible Options Tray Endpoint
-app.get('/api/possible-options', (req: Request, res: Response) => {
+app.get('/api/possible-options', async (req: Request, res: Response) => {
   const destName = (req.query.destination as string) || 'Darjeeling';
   const options = getPossibleOptionsForDestination(destName);
+  await applyRealImagesToOptions(options, destName);
   res.json(options);
 });
 

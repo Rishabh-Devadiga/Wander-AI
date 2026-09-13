@@ -425,26 +425,28 @@ def places_live(destination: str = Query(min_length=1, max_length=255),
 def place_image(
     location: str = Query(min_length=1, max_length=255),
     destination: Optional[str] = Query(default=None, max_length=255),
+    count: int = Query(default=1, ge=1, le=6),
 ):
-    """Real photo for one location via SerpApi Google Images (backend key).
+    """Real photos for one location via SerpApi Google Images (backend key).
 
-    Always 200 with ``image_url`` null when nothing real is found -- never
-    fabricated, and a provider failure never breaks trip generation.
+    Returns up to ``count`` distinct relevance-ranked photos from a single
+    provider call. Always 200 with an empty list when nothing real is found --
+    never fabricated, and a provider failure never breaks trip generation.
     503 when the key is unconfigured; 422 on blank location.
     """
-    from backend.images.service import get_real_image_for_location
+    from backend.images.service import get_real_images_for_location
     api_key = (settings.SERPAPI_API_KEY or "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="Image search provider is not configured")
     query = location.strip()
     if not query:
         raise HTTPException(status_code=422, detail="location must not be blank")
-    image_url = get_real_image_for_location(
+    images = get_real_images_for_location(
         query, (destination or "").strip() or None,
-        api_key, settings.SERPAPI_BASE_URL, settings.SERPAPI_TIMEOUT_S,
+        api_key, settings.SERPAPI_BASE_URL, settings.SERPAPI_TIMEOUT_S, count,
     )
-    return {"location": query, "image_url": image_url,
-            "source": "serpapi_images" if image_url else "none"}
+    return {"location": query, "image_url": images[0] if images else None,
+            "images": images, "source": "serpapi_images" if images else "none"}
 
 
 @router.get("/restaurants/search", response_model=RestaurantSearchResponse)
