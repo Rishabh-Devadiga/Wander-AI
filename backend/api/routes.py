@@ -17,7 +17,7 @@ from backend.schemas.schemas import (
     TripManagementContext, TripManagementResult, BookingRecommendationContext,
     BookingRecommendationResult, AssistantChatContext, AssistantChatResult,
     SerpApiHotelResult, HotelSearchResponse, SelectHotelRequest,
-    LivePlace, PlacesLiveResponse
+    LivePlace, PlacesLiveResponse, PlaceImageResponse, SerpApiRestaurantResult, RestaurantSearchResponse
 )
 from backend.ai.gemini_service import gemini_service
 from backend.research.service import DestinationResearchService, ResearchExecutionError
@@ -419,6 +419,69 @@ def places_live(destination: str = Query(min_length=1, max_length=255),
             "longitude": result["longitude"],
             "places": [LivePlace(**place) for place in result["places"]],
             "source": result["source"]}
+
+
+@router.get("/places/image", response_model=PlaceImageResponse)
+def place_image(
+    location: str = Query(min_length=1, max_length=255),
+    destination: Optional[str] = Query(default=None, max_length=255),
+):
+    """Real photo for one location via SerpApi Google Images (backend key).
+
+    Always 200 with ``image_url`` null when nothing real is found -- never
+    fabricated, and a provider failure never breaks trip generation.
+    503 when the key is unconfigured; 422 on blank location.
+    """
+    from backend.images.service import get_real_image_for_location
+    api_key = (settings.SERPAPI_API_KEY or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Image search provider is not configured")
+    query = location.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="location must not be blank")
+    image_url = get_real_image_for_location(
+        query, (destination or "").strip() or None,
+        api_key, settings.SERPAPI_BASE_URL, settings.SERPAPI_TIMEOUT_S,
+    )
+    return {"location": query, "image_url": image_url,
+            "source": "serpapi_images" if image_url else "none"}
+
+
+@router.get("/restaurants/search", response_model=RestaurantSearchResponse)
+def search_restaurants_live(
+    destination: str = Query(min_length=1, max_length=255),
+    meal_type: Optional[str] = Query(default=None, max_length=20),
+    cuisine: Optional[str] = Query(default=None, max_length=100),
+    latitude: Optional[float] = Query(default=None, ge=-90, le=90),
+    longitude: Optional[float] = Query(default=None, ge=-180, le=180),
+    min_rating: Optional[float] = Query(default=None, ge=0, le=5),
+    max_results: int = Query(default=8, ge=1, le=20),
+):
+    """Live restaurant search via SerpApi Google Maps (backend key, normalized).
+
+    Returns real local-business candidates only. Empty list when the provider
+    has no results; 503 when the key is unconfigured; 502 on provider failure.
+    """
+    from backend.restaurants.service import SerpApiRestaurantError, search_serpapi_restaurants
+    api_key = (settings.SERPAPI_API_KEY or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Restaurant search provider is not configured")
+    meal = (meal_type or "").strip().lower() or None
+    if meal is not None and meal not in {"breakfast", "brunch", "lunch", "dinner"}:
+        raise HTTPException(status_code=422, detail="meal_type must be breakfast, brunch, lunch, or dinner")
+    try:
+        results = search_serpapi_restaurants(
+            api_key, settings.SERPAPI_BASE_URL, destination=destination.strip(),
+            meal_type=meal, cuisine=(cuisine or "").strip() or None,
+            latitude=latitude, longitude=longitude, min_rating=min_rating,
+            timeout_s=settings.SERPAPI_TIMEOUT_S, max_results=max_results,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SerpApiRestaurantError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"destination": destination.strip(), "meal_type": meal, "cuisine": (cuisine or "").strip() or None,
+            "results": [SerpApiRestaurantResult(**item) for item in results], "source": "serpapi"}
 
 
 # ----------------------------------------------------

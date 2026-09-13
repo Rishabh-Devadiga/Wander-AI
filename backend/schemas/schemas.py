@@ -159,6 +159,13 @@ class PlacesLiveResponse(BaseModel):
     source: str = "overpass+commons"
 
 
+# Real photo for one location (SerpApi Google Images only, never fabricated)
+class PlaceImageResponse(BaseModel):
+    location: str
+    image_url: Optional[str] = None
+    source: str = "serpapi_images"
+
+
 # Live SerpApi hotel search (normalized; never the raw provider payload)
 class SerpApiHotelResult(BaseModel):
     id: str
@@ -185,6 +192,32 @@ class HotelSearchResponse(BaseModel):
     check_out_date: str
     currency: str
     results: List[SerpApiHotelResult] = Field(default_factory=list)
+    source: str = "serpapi"
+
+
+# Live SerpApi restaurant search (normalized Google Maps local results only)
+class SerpApiRestaurantResult(BaseModel):
+    id: str
+    place_id: Optional[str] = None
+    name: str
+    address: Optional[str] = None
+    rating: Optional[float] = None
+    reviews_count: Optional[int] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    website: Optional[str] = None
+    phone: Optional[str] = None
+    hours: Optional[str] = None
+    image_url: Optional[str] = None
+    types: List[str] = Field(default_factory=list)
+    source: str = "serpapi"
+
+
+class RestaurantSearchResponse(BaseModel):
+    destination: str
+    meal_type: Optional[str] = None
+    cuisine: Optional[str] = None
+    results: List[SerpApiRestaurantResult] = Field(default_factory=list)
     source: str = "serpapi"
 
 

@@ -278,7 +278,33 @@ export interface ItineraryItem {
   activity_id?: string;
   transport_id?: string;
   location?: string;
-  meta_data?: Record<string, any>;
+  meta_data?: Record<string, any> & { restaurant?: RestaurantInfo | null };
+}
+
+// Real restaurant attached to a meal item. Every field originates from the
+// SerpApi Google Maps provider response; missing values stay null/undefined
+// and are never fabricated.
+export interface RestaurantInfo {
+  name: string;
+  address?: string | null;
+  rating?: number | null;
+  reviews_count?: number | null;
+  place_id?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  website?: string | null;
+  phone?: string | null;
+  hours?: string | null;
+  image_url?: string | null;
+  source: 'serpapi';
+}
+
+export interface RestaurantSearchResponse {
+  destination: string;
+  meal_type?: string | null;
+  cuisine?: string | null;
+  results: RestaurantInfo[] & { id?: string }[];
+  source: string;
 }
 
 export interface Booking {
