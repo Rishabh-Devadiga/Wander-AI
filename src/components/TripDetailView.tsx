@@ -1,10 +1,10 @@
 import React, { useState, FormEvent } from 'react';
-import { 
-  Calendar, MapPin, DollarSign, Clock, Users, ShieldAlert, 
+import {
+  Calendar, MapPin, DollarSign, Clock, Users, ShieldAlert,
   Bell, History, Star, RefreshCw, CheckCircle2, ChevronRight,
   Sliders, Plus, AlertTriangle, ArrowRight, Bed, Mountain, Car, Sparkles,
   Luggage, Share2, Printer, CheckSquare, Square, Calculator, MessageCircle,
-  Map as MapIcon, Trash2
+  Map as MapIcon, Trash2, UtensilsCrossed, ExternalLink
 } from 'lucide-react';
 import { Trip } from '../types/tourflow';
 import { TourFlowApi } from '../services/api';
@@ -408,6 +408,8 @@ export default function TripDetailView({ trip, onRefreshTrip, onOpenEditPreferen
                                 <Bed className="w-4 h-4" />
                               ) : item.item_type === 'transport' ? (
                                 <Car className="w-4 h-4" />
+                              ) : item.item_type === 'meal' ? (
+                                <UtensilsCrossed className="w-4 h-4" />
                               ) : (
                                 <Mountain className="w-4 h-4" />
                               )}
@@ -427,6 +429,51 @@ export default function TripDetailView({ trip, onRefreshTrip, onOpenEditPreferen
                                   <MapPin className="w-3 h-3 text-rose-400" />
                                   <span>{item.location}</span>
                                 </p>
+                              )}
+                              {item.item_type === 'meal' && (item.meta_data as any)?.restaurant && (
+                                <div className="mt-2 p-3 rounded-xl bg-orange-50/70 border border-orange-200/70 space-y-1.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <UtensilsCrossed className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                                    <span className="text-xs font-bold text-stone-900">{(item.meta_data as any).restaurant.name}</span>
+                                    {(item.meta_data as any).restaurant.rating != null && (
+                                      <span className="ml-auto flex items-center gap-1 text-[11px] font-bold text-amber-600">
+                                        <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                                        {(item.meta_data as any).restaurant.rating}
+                                        {(item.meta_data as any).restaurant.reviews_count != null && (
+                                          <span className="font-medium text-stone-400">({(item.meta_data as any).restaurant.reviews_count})</span>
+                                        )}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {(item.meta_data as any).restaurant.address && (
+                                    <p className="text-[11px] text-stone-500 flex items-center gap-1">
+                                      <MapPin className="w-3 h-3 text-orange-400 shrink-0" />
+                                      <span>{(item.meta_data as any).restaurant.address}</span>
+                                    </p>
+                                  )}
+                                  {(item.meta_data as any).restaurant.image_url && (
+                                    <img
+                                      src={(item.meta_data as any).restaurant.image_url}
+                                      alt={(item.meta_data as any).restaurant.name}
+                                      className="w-full h-28 object-cover rounded-lg border border-orange-100"
+                                      loading="lazy"
+                                    />
+                                  )}
+                                  <div className="flex items-center gap-2 pt-0.5">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-orange-600/80">Live verified · SerpApi</span>
+                                    <a
+                                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                                        (item.meta_data as any).restaurant.name + ((item.meta_data as any).restaurant.address ? `, ${(item.meta_data as any).restaurant.address}` : '')
+                                      )}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="ml-auto inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 hover:text-rose-700"
+                                    >
+                                      <span>Directions</span>
+                                      <ExternalLink className="w-3 h-3" />
+                                    </a>
+                                  </div>
+                                </div>
                               )}
                             </div>
                           </div>

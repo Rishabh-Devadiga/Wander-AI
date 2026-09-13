@@ -737,6 +737,135 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-13 Real Activity Photos (SerpApi Google Images)
+
+Inspected:
+
+- Activity image pipeline (`src/server/itineraryEngine.ts` hardcoded Unsplash knowledge base + `src/utils/imageCatalog.ts` keyword matcher), which attached the same small pool of stock URLs by keyword (e.g. a boat photo on "Botanical Gardens in Kashmir"); existing provider-image paths (`backend/places/service.py` Overpass/Commons, `backend/hotels/service.py`, `backend/restaurants/service.py`).
+
+Changed:
+
+- First attempt used Wikimedia Commons geosearch for per-activity photos, but live verification showed Wikimedia returns HTTP 403/429 robot-policy blocks from this server environment, so Commons cannot serve images reliably here. Switched to SerpApi Google Images (existing key, same backend-only pattern as hotels/restaurants).
+- Added `backend/images/` service (new): `GET {base}/search?engine=google_images&q=<activity>, <destination>&hl=en&gl=in`, normalization prefers `original` then `thumbnail` (http(s) only, unusable records skipped), per-query in-memory cache (one provider call per unique location).
+- Added `GET /api/places/image?location=&destination=` (503 when key unconfigured, 422 on blank location; always 200 with `image_url` null when nothing real is found, so a provider failure never breaks trip generation) with `PlaceImageResponse` schema. No new required environment variables.
+- Express `buildCanonicalTripAsync` now runs `applyRealImagesToActivities` after the restaurant overlay: activity/sightseeing/leisure/meal items still carrying curated Unsplash stock photos get real provider photos (bounded concurrency of 4, per-trip location cache, 8 s per-request budget); items already holding SerpApi/Commons photos are skipped and failures keep the catalog image. Times, titles, ordering, and costs are untouched. Added Express `GET /api/places/image` proxy to FastAPI.
+- Transport/hotel images intentionally unchanged (catalog photos).
+
+Files modified:
+
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `server.ts`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `backend/images/__init__.py`
+- `backend/images/service.py`
+
+APIs/routes added:
+
+- `GET /api/places/image` — real relevance-ranked photo for one location (FastAPI + Express proxy).
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (92 passed, 149 warnings), including 5 new image tests (real-photo mapping + query shape, unusable-record skipping + empty + 422, graceful degradation on provider error, missing-key 503 without call, single-call cache dedup, no-hardcoded-URL scan).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean (see below).
+- Live verification against restarted FastAPI: `GET /api/places/image?location=Nishat Bagh&destination=Kashmir` returned HTTP 200 with `source=serpapi_images` and a real Nishat Bagh photo (`upload.wikimedia.org/.../Nishat_Bagh.JPG`, 1 SerpApi credit).
+- Restart note: the running `npm run dev` (plain `tsx server.ts`, no watch, started before these changes) still serves stale code, so the new Express proxy/enrichment activates after restarting it; the running FastAPI was restarted and serves the new endpoint.
+
+Known remaining issues:
+
+- Each trip generation now spends roughly one SerpApi image search per unique activity title without a real photo yet (cached per location, bounded concurrency); catalog images remain as fallback when the provider has nothing.
+- Transport/hotel card photos still come from the curated Unsplash catalog.
+
+### 2026-09-13 Location-Aware Restaurant Matching (Per-Meal Anchors)
+
+Inspected:
+
+- Round-robin meal assignment in `server.ts` (`applyLiveRestaurantsToItinerary`), Express live-place overlay (`applyLivePlacesToItinerary`), `backend/restaurants/service.py` ranking helpers, and `src/server/restaurantMatching.ts` after extraction.
+
+Changed:
+
+- Replaced round-robin assignment with per-meal location-aware selection. Every `meal` item anchors to its nearest scheduled neighbour (previous first, then next, skipping disabled items and other meals): anchor text from the neighbour title/location and anchor coordinates from the neighbour `meta_data.live_place` (now stashed by `applyLivePlacesToItinerary` from Overpass/Commons coordinates).
+- Shared SerpApi pool is ranked per meal by real haversine distance to the anchor, then rating (+cuisine text bonus from provider-returned fields only), review count, and name; venues whose provider hours say "closed" sort last. Already-used venues are skipped until the pool is exhausted (last resort reuses the nearest used venue rather than inventing one).
+- A targeted SerpApi Google Maps search (`GET /api/restaurants/search?destination=<anchor>, <city>&meal_type=&latitude=&longitude=`) runs only when no unused pool venue is within `RESTAURANT_ANCHOR_RADIUS_KM` (15 km); results merge into the pool (deduplicated) so later meals reuse them. No extra call when the existing pool already has a suitable venue or when the anchor has no coordinates/text.
+- Extracted pure matching helpers (`haversineKm`, `mealTypeForItem`, `anchorForMeal`, `rankRestaurantsForAnchor`, `RESTAURANT_ANCHOR_RADIUS_KM`) into `src/server/restaurantMatching.ts` (side-effect-free, imported by `server.ts`).
+- Added `haversine_km()` and `rank_candidates_for_anchor()` (same deterministic ordering, `distance_km` copies, `max_distance_km` filter, no input mutation) to `backend/restaurants/service.py` for backend-side anchor ranking.
+- Fixed `Number(null) === 0` coercion: null/undefined/blank coordinates now measure as unknown (None/null) instead of (0,0) in both TS and Python paths.
+- Budget note: SerpApi Maps results carry no per-venue prices, so budget cannot factor into ranking; meal cost estimates are unchanged.
+
+Files modified:
+
+- `server.ts`
+- `src/server/restaurantMatching.ts` (created, then `server.ts` consolidated onto it)
+- `backend/restaurants/service.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (87 passed, 149 warnings), including 4 new anchor tests (haversine Gateway→Colaba ≈2.7 km + invalid inputs, nearby-beats-far + no input mutation, rating fallback without anchor coords, closed-last + max-distance + exclusion).
+- Node runtime checks against the esbuild-bundled `restaurantMatching.ts`: passed (haversine incl. null/undefined/blank/invalid, lunch→Gateway anchor with coords, dinner→Colaba anchor, nearby-wins ranking, rating fallback, null-coord neighbour never anchors to (0,0), meal-type detection). The first run caught the `Number(null)===0` bug; fixed and re-passed.
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean (see below).
+
+Known remaining issues:
+
+- Anchor coordinates exist only when the neighbouring activity received live Overpass/Commons coordinates; otherwise matching falls back to rating order with the anchor text used for targeted search.
+
+### 2026-09-13 Real Restaurants for Meals (SerpApi Google Maps)
+
+Inspected:
+
+- Existing SerpApi hotel client (`backend/hotels/service.py`), FastAPI hotel/places routes (`backend/api/routes.py`), Pydantic schemas (`backend/schemas/schemas.py`), settings (`backend/database/config.py`), Express live trip creation (`server.ts` → `buildCanonicalTripAsync` → `fetchLiveTripEnrichment` → `itineraryService.generateItinerary` → `validateAndEnforceItinerary` → `applyLivePlacesToItinerary`), meal generation points (`src/server/services/itineraryService.ts`, `src/server/itineraryEngine.ts`, `backend/ai/gemini_service.py` fallback `meal` item), itinerary UI (`src/components/TripDetailView.tsx`), API client (`src/services/api.ts`), types (`src/types/tourflow.ts`), and backend tests (`tests/test_backend.py`).
+
+Changed:
+
+- Added `backend/restaurants/` service (new, backend-only, reuses `SERPAPI_API_KEY`): Google Maps search (`engine=google_maps`, `type=search`, `q="Restaurants in <destination> [<cuisine>] [<meal>]`", `hl=en`, `gl=in`, optional `ll=@lat,lng,14z`), normalization of `local_results[]` only (name required; address/rating/reviews/coords/thumbnail/website/phone/hours pass through only when returned, otherwise None; malformed records skipped), in-memory per-query cache (one provider call shared across all meals of a destination), deterministic rating-ordered selection, `validate_gemini_selection()` (rejects any ID outside the candidate list), and `rank_with_gemini()` (Gemini receives only retrieved candidates and must return an existing candidate ID; unknown IDs fall back to the provider-ordered best).
+- Added `GET /api/restaurants/search?destination=&meal_type=&cuisine=&latitude=&longitude=&min_rating=&max_results=` (503 when key unconfigured, 422 on blank destination or invalid meal_type, 502 on provider failure) with `SerpApiRestaurantResult`/`RestaurantSearchResponse` schemas. No new required environment variables; added optional tuning setting `SERPAPI_RESTAURANT_MAX_RESULTS` (default 8).
+- Express `buildCanonicalTripAsync` now best-effort enriches every generated trip with restaurants: `fetchLiveTripEnrichment` fetches hotels, places, and restaurants concurrently (single restaurant call per trip); `applyLiveRestaurantsToItinerary` attaches one real restaurant per `meal` item round-robin (title becomes "Lunch at {name}", location becomes the provider address, image only when the provider returns one, verifiable fields stored in `meta_data.restaurant` with `source: serpapi`). Times, ordering, and meal costs are preserved. Provider failure or empty results leave meals without restaurant data (`restaurant` absent) instead of inventing venues. Added Express `GET /api/restaurants/search` proxy to FastAPI (`FASTAPI_BASE_URL`, default `http://localhost:8000`).
+- Frontend: `RestaurantInfo` type, `meta_data.restaurant` on `ItineraryItem`, `TourFlowApi.searchRestaurants()`, and a meal card in `TripDetailView` (name, rating + review count, address, provider image, "Live verified · SerpApi" label, Google Maps directions link). No existing hotel/transport/activity/itinerary logic was rewritten.
+
+Files modified:
+
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `backend/database/config.py`
+- `server.ts`
+- `src/types/tourflow.ts`
+- `src/services/api.ts`
+- `src/components/TripDetailView.tsx`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `backend/restaurants/__init__.py`
+- `backend/restaurants/service.py`
+
+APIs/routes added:
+
+- `GET /api/restaurants/search` — live normalized restaurant search (FastAPI + Express proxy).
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with `DATABASE_URL=sqlite:///C:/Users/Victus/AppData/Local/Temp/opencode/test_tourflow.db`: passed (83 passed, 149 warnings), including 8 new restaurant tests (mapping, missing/malformed fields, invalid meal/destination, empty+error paths, missing-key 503, Gemini-selection validation + fallback, single-call cache dedup, no-hardcoded-data scan).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean.
+- OpenAPI assertion: `/api/restaurants/search` present.
+- `tourflow.db` restored after verification so no binary diff remains.
+
+Known remaining issues:
+
+- Live restaurant enrichment runs on the Express trip-creation path (the live generation path); the FastAPI catalog-grounded generator creates no `meal` items, so restaurant attachment applies where meals exist.
+- SerpApi Maps results carry no per-meal pricing, so meal cost estimates are unchanged while restaurant identity is live.
+
 ### 2026-09-12 Live Itinerary Generation (SerpApi Hotels + Overpass/Commons Places)
 
 Inspected:

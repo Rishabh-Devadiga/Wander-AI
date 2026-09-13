@@ -666,6 +666,28 @@ export const TourFlowApi = {
     return await res.json();
   },
 
+  // Live restaurant search (SerpApi Google Maps via backend; key never reaches browser).
+  async searchRestaurants(params: {
+    destination: string;
+    meal_type?: 'breakfast' | 'brunch' | 'lunch' | 'dinner';
+    cuisine?: string;
+    latitude?: number;
+    longitude?: number;
+    min_rating?: number;
+    max_results?: number;
+  }): Promise<{ destination: string; meal_type?: string | null; cuisine?: string | null; results: any[]; source: string }> {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+    });
+    const res = await fetch(`${API_BASE}/restaurants/search?${query.toString()}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Restaurant search failed' }));
+      throw new Error(err.detail || 'Restaurant search failed');
+    }
+    return await res.json();
+  },
+
   // Persist a traveler-selected live hotel against the trip itinerary.
   async selectHotel(tripId: string, selection: {
     day_number?: number;

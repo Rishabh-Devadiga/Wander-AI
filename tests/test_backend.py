@@ -2218,3 +2218,354 @@ def test_places_service_never_raises(monkeypatch):
     result = places_service.get_live_places("Nowhere", None, None, 5,
                                             "http://x", "http://x", "http://x", 1, 1)
     assert result["places"] == []
+
+
+# ---------------------------------------------------------------------------
+# Live SerpApi restaurant search (mocked transport; never hits the real API)
+# ---------------------------------------------------------------------------
+def _serpapi_restaurant(**overrides):
+    entry = {
+        "title": "Riverbank Live Kitchen",
+        "place_id": "ChIJtest-place-001",
+        "address": "Mall Road, Manali",
+        "rating": 4.5,
+        "reviews": 2314,
+        "gps_coordinates": {"latitude": 32.2396, "longitude": 77.1887},
+        "thumbnail": "https://example.test/restaurant.jpg",
+        "website": "https://example.test/kitchen",
+        "phone": "+91-11111-22222",
+        "hours": "Mon-Sun 11:00 AM - 10:30 PM",
+        "types": ["restaurant", "food"],
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _mock_restaurants(monkeypatch, payload, key="test-serpapi-key"):
+    import backend.restaurants.service as restaurant_service
+
+    calls = {}
+    restaurant_service.clear_restaurant_cache()
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", key)
+
+    def fake_get(url, params, timeout):
+        calls["url"] = url
+        calls["params"] = params
+        calls["count"] = calls.get("count", 0) + 1
+        return _FakeSerpApiResponse(payload)
+
+    monkeypatch.setattr(restaurant_service, "_http_get", fake_get)
+    return calls
+
+
+def _restaurant_params(**overrides):
+    params = {"destination": "Manali"}
+    params.update(overrides)
+    return params
+
+
+def test_restaurants_search_success_and_mapping(monkeypatch):
+    calls = _mock_restaurants(monkeypatch, {"local_results": [
+        _serpapi_restaurant(),
+        _serpapi_restaurant(title="Hillside Live Diner", place_id="ChIJtest-place-002", rating=4.1),
+    ]})
+    response = client.get("/api/restaurants/search", params=_restaurant_params())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "serpapi"
+    assert body["destination"] == "Manali"
+    assert calls["params"]["engine"] == "google_maps"
+    assert calls["params"]["type"] == "search"
+    assert "Restaurants in Manali" in calls["params"]["q"]
+    assert "api_key" not in str(calls["url"])
+    assert len(body["results"]) == 2
+    first = body["results"][0]
+    assert first["name"] == "Riverbank Live Kitchen"
+    assert first["place_id"] == "ChIJtest-place-001"
+    assert first["address"] == "Mall Road, Manali"
+    assert first["rating"] == pytest.approx(4.5)
+    assert first["reviews_count"] == 2314
+    assert first["latitude"] == pytest.approx(32.2396)
+    assert first["image_url"] == "https://example.test/restaurant.jpg"
+    assert first["website"] == "https://example.test/kitchen"
+    assert first["hours"] == "Mon-Sun 11:00 AM - 10:30 PM"
+    assert first["source"] == "serpapi"
+
+
+def test_restaurants_missing_fields_and_malformed_records(monkeypatch):
+    _mock_restaurants(monkeypatch, {"local_results": [
+        {"title": "Name Only Eatery"},
+        {"rating": 4.0},
+        "not-a-record",
+        None,
+    ]})
+    response = client.get("/api/restaurants/search", params=_restaurant_params())
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert len(results) == 1
+    only = results[0]
+    assert only["name"] == "Name Only Eatery"
+    assert only["rating"] is None and only["address"] is None
+    assert only["image_url"] is None and only["website"] is None
+
+
+def test_restaurants_invalid_meal_and_missing_destination(monkeypatch):
+    _mock_restaurants(monkeypatch, {"local_results": []})
+    assert client.get("/api/restaurants/search",
+                      params=_restaurant_params(meal_type="supper")).status_code == 422
+    assert client.get("/api/restaurants/search").status_code == 422
+
+
+def test_restaurants_empty_results_and_error_paths(monkeypatch):
+    import httpx
+    import backend.restaurants.service as restaurant_service
+
+    _mock_restaurants(monkeypatch, {"local_results": []})
+    assert client.get("/api/restaurants/search", params=_restaurant_params()).json()["results"] == []
+
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "test-serpapi-key")
+    restaurant_service.clear_restaurant_cache()
+
+    def boom(url, params, timeout):
+        raise httpx.ConnectError("blocked")
+
+    monkeypatch.setattr(restaurant_service, "_http_get", boom)
+    assert client.get("/api/restaurants/search", params=_restaurant_params()).status_code == 502
+
+    def api_error(url, params, timeout):
+        return _FakeSerpApiResponse({"error": "Invalid API key"})
+
+    monkeypatch.setattr(restaurant_service, "_http_get", api_error)
+    assert client.get("/api/restaurants/search", params=_restaurant_params()).status_code == 502
+
+
+def test_restaurants_missing_key_returns_503_without_call(monkeypatch):
+    import backend.restaurants.service as restaurant_service
+
+    restaurant_service.clear_restaurant_cache()
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "")
+
+    def must_not_run(url, params, timeout):
+        raise AssertionError("SerpApi must not be called without a key")
+
+    monkeypatch.setattr(restaurant_service, "_http_get", must_not_run)
+    assert client.get("/api/restaurants/search", params=_restaurant_params()).status_code == 503
+
+
+def test_restaurant_gemini_selection_validation():
+    from backend.restaurants.service import (
+        select_best_candidate, validate_gemini_selection, rank_with_gemini,
+    )
+
+    candidates = [_serpapi_restaurant(), _serpapi_restaurant(
+        title="Second", place_id="ChIJtest-place-002", rating=4.1)]
+    normalized = [
+        {"id": "serpapi-restaurant-ChIJtest-place-001", "place_id": "ChIJtest-place-001",
+         "name": "Riverbank Live Kitchen", "rating": 4.5, "reviews_count": 10},
+        {"id": "serpapi-restaurant-ChIJtest-place-002", "place_id": "ChIJtest-place-002",
+         "name": "Second", "rating": 4.1, "reviews_count": 5},
+    ]
+    # Hallucinated IDs are rejected; deterministic fallback is a real candidate.
+    assert validate_gemini_selection(normalized, "serpapi-restaurant-invented-999") is None
+    assert validate_gemini_selection(normalized, "  ") is None
+    assert validate_gemini_selection(
+        normalized, "serpapi-restaurant-ChIJtest-place-002")["name"] == "Second"
+    assert select_best_candidate(normalized)["name"] == "Riverbank Live Kitchen"
+    assert select_best_candidate([]) is None
+    # Without Gemini configured, ranking falls back to provider order.
+    selected, source = rank_with_gemini(normalized, None, {"meal": "dinner"})
+    assert selected["name"] == "Riverbank Live Kitchen" and source == "serpapi"
+    assert {c["title"] for c in candidates} == {"Riverbank Live Kitchen", "Second"}
+
+
+def test_restaurants_deduplicate_searches_with_cache(monkeypatch):
+    calls = _mock_restaurants(monkeypatch, {"local_results": [_serpapi_restaurant()]})
+    assert client.get("/api/restaurants/search", params=_restaurant_params()).status_code == 200
+    assert client.get("/api/restaurants/search", params=_restaurant_params()).status_code == 200
+    assert calls["count"] == 1
+
+
+def test_no_hardcoded_restaurant_data_in_service():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, "backend", "restaurants", "service.py")
+    with open(path, encoding="utf-8") as handle:
+        source = handle.read().lower()
+    banned_chains = ["mcdonald", "starbucks", "dominos", "pizza hut", "kfc",
+                     "quanjude", "keventers", "bukhara", "karim"]
+    assert not any(chain in source for chain in banned_chains)
+    assert "local_results" in source and "google_maps" in source
+
+
+# ---------------------------------------------------------------------------
+# Location-aware restaurant ranking (no provider calls; pure ranking logic)
+# ---------------------------------------------------------------------------
+def _ranked_candidate(name, lat, lng, rating=4.0, reviews=100, hours=None):
+    return {"id": f"serpapi-restaurant-{name}", "place_id": name, "name": name,
+            "address": f"{name} address", "rating": rating, "reviews_count": reviews,
+            "latitude": lat, "longitude": lng, "hours": hours, "types": ["restaurant"]}
+
+
+def test_haversine_km_measures_gateway_to_colaba():
+    from backend.restaurants.service import haversine_km
+
+    # Gateway of India (18.9220, 72.8347) to Colaba Causeway (~18.9067, 72.8147).
+    distance = haversine_km(18.9220, 72.8347, 18.9067, 72.8147)
+    assert distance == pytest.approx(2.7, abs=0.4)
+    assert haversine_km(18.9220, 72.8347, 18.9220, 72.8347) == pytest.approx(0.0)
+    assert haversine_km(None, 72.8, 18.9, 72.8) is None
+    assert haversine_km("bad", 72.8, 18.9, 72.8) is None
+
+
+def test_rank_prefers_nearby_restaurant_over_higher_rated_far_one():
+    from backend.restaurants.service import rank_candidates_for_anchor
+
+    anchor = {"anchor_latitude": 18.9220, "anchor_longitude": 72.8347}  # Gateway of India
+    near = _ranked_candidate("Gateway Nearby Kitchen", 18.9210, 72.8330, rating=4.1)
+    far = _ranked_candidate("Distant Fine Dining", 19.1000, 72.9000, rating=4.9, reviews=9000)
+    ranked = rank_candidates_for_anchor([far, near], **anchor)
+    assert ranked[0]["name"] == "Gateway Nearby Kitchen"
+    assert ranked[0]["distance_km"] == pytest.approx(0.2, abs=0.2)
+    assert ranked[1]["name"] == "Distant Fine Dining"
+    # Inputs are not mutated with distance keys.
+    assert "distance_km" not in near and "distance_km" not in far
+
+
+def test_rank_without_anchor_coordinates_falls_back_to_rating_order():
+    from backend.restaurants.service import rank_candidates_for_anchor
+
+    low = _ranked_candidate("Low Rated", 18.9, 72.8, rating=3.8)
+    high = _ranked_candidate("High Rated", 18.9, 72.8, rating=4.7)
+    ranked = rank_candidates_for_anchor([low, high])
+    assert [r["name"] for r in ranked] == ["High Rated", "Low Rated"]
+    assert all(r["distance_km"] is None for r in ranked)
+
+
+def test_rank_deprioritizes_closed_venues_and_applies_max_distance():
+    from backend.restaurants.service import rank_candidates_for_anchor
+
+    anchor = {"anchor_latitude": 18.9220, "anchor_longitude": 72.8347}
+    closed_near = _ranked_candidate("Closed Nearby", 18.9215, 72.8340, rating=4.8,
+                                   hours="Monday: Closed")
+    open_near = _ranked_candidate("Open Nearby", 18.9210, 72.8330, rating=4.2)
+    far_open = _ranked_candidate("Far Open", 19.3000, 73.0000, rating=4.9)
+    ranked = rank_candidates_for_anchor([closed_near, open_near, far_open], **anchor)
+    assert ranked[0]["name"] == "Open Nearby"
+    nearby_only = rank_candidates_for_anchor(
+        [closed_near, open_near, far_open], max_distance_km=15.0, **anchor)
+    assert {r["name"] for r in nearby_only} == {"Closed Nearby", "Open Nearby"}
+    excluded = rank_candidates_for_anchor(
+        [closed_near, open_near], exclude_ids=["serpapi-restaurant-Open Nearby"], **anchor)
+    assert [r["name"] for r in excluded] == ["Closed Nearby"]
+    assert rank_candidates_for_anchor([], **anchor) == []
+
+
+# ---------------------------------------------------------------------------
+# Real per-location images via SerpApi Google Images (mocked; never hits API)
+# ---------------------------------------------------------------------------
+def _serpapi_image(title="Nishat Bagh", original="https://upload.wikimedia.org/real-garden.jpg",
+                   thumbnail="https://encrypted-tbn0.gstatic.com/real-thumb"):
+    return {"title": title, "original": original, "thumbnail": thumbnail}
+
+
+def _mock_place_images(monkeypatch, payload, key="test-serpapi-key"):
+    import backend.images.service as images_service
+
+    images_service.clear_image_cache()
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", key)
+    calls = {}
+
+    def fake_get(url, params, timeout):
+        calls["url"] = url
+        calls["params"] = params
+        calls["count"] = calls.get("count", 0) + 1
+        return _FakeSerpApiResponse(payload)
+
+    monkeypatch.setattr(images_service, "_http_get", fake_get)
+    return calls
+
+
+def test_place_image_returns_real_provider_photo(monkeypatch):
+    calls = _mock_place_images(monkeypatch, {"images_results": [_serpapi_image()]})
+    response = client.get("/api/places/image",
+                          params={"location": "Nishat Bagh", "destination": "Kashmir"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["image_url"] == "https://upload.wikimedia.org/real-garden.jpg"
+    assert body["source"] == "serpapi_images"
+    assert body["location"] == "Nishat Bagh"
+    assert calls["params"]["engine"] == "google_images"
+    assert "Nishat Bagh" in calls["params"]["q"] and "Kashmir" in calls["params"]["q"]
+    assert "api_key" not in str(calls["url"])
+
+
+def test_place_image_skips_unusable_records_and_empty_results(monkeypatch):
+    _mock_place_images(monkeypatch, {"images_results": [
+        {"title": "No URLs Here"},
+        {"title": "Bad", "original": "ftp://example.test/x.jpg"},
+        "not-a-record",
+        None,
+        _serpapi_image(title="Fallback", original=None),
+    ]})
+    response = client.get("/api/places/image", params={"location": "Dal Lake"})
+    assert response.status_code == 200
+    assert response.json()["image_url"] == "https://encrypted-tbn0.gstatic.com/real-thumb"
+
+    _mock_place_images(monkeypatch, {"images_results": []})
+    response = client.get("/api/places/image", params={"location": "Nowhere Imaginary"})
+    assert response.status_code == 200
+    assert response.json()["image_url"] is None
+    assert response.json()["source"] == "none"
+    assert client.get("/api/places/image").status_code == 422
+
+
+def test_place_image_error_paths_and_missing_key(monkeypatch):
+    import httpx
+    import backend.images.service as images_service
+
+    _mock_place_images(monkeypatch, {"images_results": []})
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "test-serpapi-key")
+    images_service.clear_image_cache()
+
+    def boom(url, params, timeout):
+        raise httpx.ConnectError("blocked")
+
+    monkeypatch.setattr(images_service, "_http_get", boom)
+    response = client.get("/api/places/image", params={"location": "Dal Lake"})
+    assert response.status_code == 200  # image lookup never breaks the trip
+    assert response.json()["image_url"] is None
+
+    def api_error(url, params, timeout):
+        return _FakeSerpApiResponse({"error": "Invalid API key"})
+
+    monkeypatch.setattr(images_service, "_http_get", api_error)
+    degraded = client.get("/api/places/image", params={"location": "Dal Lake"})
+    assert degraded.status_code == 200  # image lookup never breaks the trip
+    assert degraded.json()["image_url"] is None
+
+    images_service.clear_image_cache()
+    monkeypatch.setattr(_settings, "SERPAPI_API_KEY", "")
+
+    def must_not_run(url, params, timeout):
+        raise AssertionError("SerpApi must not be called without a key")
+
+    monkeypatch.setattr(images_service, "_http_get", must_not_run)
+    assert client.get("/api/places/image", params={"location": "Dal Lake"}).status_code == 503
+
+
+def test_place_image_deduplicates_repeated_locations(monkeypatch):
+    calls = _mock_place_images(monkeypatch, {"images_results": [_serpapi_image()]})
+    params = {"location": "Dal Lake", "destination": "Kashmir"}
+    first = client.get("/api/places/image", params=params)
+    second = client.get("/api/places/image", params=params)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["image_url"] == "https://upload.wikimedia.org/real-garden.jpg"
+    assert calls.get("count", 0) == 1
+
+
+def test_no_hardcoded_image_urls_in_images_service():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, "backend", "images", "service.py")
+    with open(path, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "unsplash.com" not in source
+    assert "images_results" in source and "google_images" in source

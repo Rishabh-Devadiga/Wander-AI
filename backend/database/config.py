@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     SERPAPI_BASE_URL: str = "https://serpapi.com"
     SERPAPI_TIMEOUT_S: float = 20.0
     SERPAPI_MAX_RESULTS: int = 10
+    # Live restaurant search (SerpApi Google Maps, backend-only). Reuses
+    # SERPAPI_API_KEY; empty key disables live search. Optional tuning only.
+    SERPAPI_RESTAURANT_MAX_RESULTS: int = 8
     # Live places/attractions (keyless providers, backend-only).
     NOMINATIM_API_URL: str = "https://nominatim.openstreetmap.org"
     OVERPASS_API_URL: str = "https://overpass-api.de/api/interpreter"

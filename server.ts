@@ -25,6 +25,12 @@ import {
   ATTRACTION_PHOTOS
 } from './src/server/itineraryEngine';
 import { computeLiveTransportOptions } from './src/server/liveTransportEngine';
+import {
+  anchorForMeal,
+  mealTypeForItem,
+  rankRestaurantsForAnchor,
+  RESTAURANT_ANCHOR_RADIUS_KM,
+} from './src/server/restaurantMatching';
 import { getPossibleOptionsForDestination } from './src/server/possibleOptionsEngine';
 import { handleConciergeChat } from './src/server/chatEngine';
 
@@ -1498,21 +1504,22 @@ function getFastApiBase(): string {
 
 async function fetchLiveTripEnrichment(params: {
   destination: string; checkIn: string; checkOut: string; travelers: number; currency: string;
-}): Promise<{ hotels: any[]; places: any[] }> {
-  const empty = { hotels: [], places: [] };
+}): Promise<{ hotels: any[]; places: any[]; restaurants: any[] }> {
+  const empty = { hotels: [], places: [], restaurants: [] };
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(params.checkIn) && /^\d{4}-\d{2}-\d{2}$/.test(params.checkOut);
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 9000);
     const base = getFastApiBase();
-    const [hotelsRes, placesRes] = await Promise.all([
+    const [hotelsRes, placesRes, restaurantsRes] = await Promise.all([
       dateOk
         ? fetch(`${base}/api/hotels/search?destination=${encodeURIComponent(params.destination)}&check_in_date=${params.checkIn}&check_out_date=${params.checkOut}&adults=${params.travelers}&currency=${encodeURIComponent(params.currency)}`, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
         : null,
       fetch(`${base}/api/places/live?destination=${encodeURIComponent(params.destination)}&limit=12`, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${base}/api/restaurants/search?destination=${encodeURIComponent(params.destination)}&max_results=8`, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ]);
     clearTimeout(timer);
-    return { hotels: hotelsRes?.results || [], places: placesRes?.places || [] };
+    return { hotels: hotelsRes?.results || [], places: placesRes?.places || [], restaurants: restaurantsRes?.results || [] };
   } catch (err) {
     return empty;
   }
@@ -1540,15 +1547,230 @@ function applyLivePlacesToItinerary(itinerary: any[], places: any[], destName: s
   if (!places || places.length === 0 || !itinerary) return;
   // Replace activity titles/images with real verified places (one use each,
   // no duplicates); times, ordering, and estimated costs are preserved.
+  // Provider coordinates are stashed in meta_data.live_place so later
+  // per-meal restaurant matching can measure real distances.
   const targets = itinerary.filter((i) => (i.item_type === 'activity' || i.item_type === 'leisure') && !i.is_disabled);
   targets.forEach((item, idx) => {
     if (idx >= places.length) return;
     const place = places[idx];
     item.title = place.name;
     item.location = destName;
-    if (place.image_url) item.image_url = place.image_url;
+    if (place.image_url) {
+      item.image_url = place.image_url;
+      item.meta_data = { ...(item.meta_data || {}), image_source: 'commons' };
+    }
     item.description = `Live verified attraction in ${destName}${place.kind ? ` (${place.kind})` : ''}.`;
+    if (place.latitude != null && place.longitude != null) {
+      item.meta_data = {
+        ...(item.meta_data || {}),
+        live_place: { latitude: place.latitude, longitude: place.longitude, kind: place.kind || null },
+      };
+    }
   });
+}
+
+// Location-aware restaurant helpers (haversine, meal anchoring, ranked
+// matching) live in `./src/server/restaurantMatching` and are imported above.
+
+async function fetchRestaurantsForAnchor(params: {
+  anchorText: string | null; destName: string; meal: string;
+  latitude: number | null; longitude: number | null; cuisine?: string | null;
+}): Promise<any[]> {
+  // Targeted SerpApi Google Maps search around the meal's anchor activity.
+  // Only called when the shared pool has no geographically suitable venue.
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 9000);
+    const base = getFastApiBase();
+    const query = new URLSearchParams();
+    const where = params.anchorText ? `${params.anchorText}, ${params.destName}` : params.destName;
+    query.set('destination', where);
+    if (params.meal === 'breakfast' || params.meal === 'lunch' || params.meal === 'dinner') {
+      query.set('meal_type', params.meal);
+    }
+    if (params.cuisine) query.set('cuisine', params.cuisine);
+    if (params.latitude !== null && params.longitude !== null) {
+      query.set('latitude', String(params.latitude));
+      query.set('longitude', String(params.longitude));
+    }
+    query.set('max_results', '8');
+    const res = await fetch(`${base}/api/restaurants/search?${query.toString()}`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const body = await res.json().catch(() => null);
+    return body?.results || [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function markRealImage(item: any, source: 'commons' | 'serpapi'): void {
+  item.meta_data = { ...(item.meta_data || {}), image_source: source };
+}
+
+function hasRealImage(item: any): boolean {
+  // Provider-backed photos only: SerpApi business/place photos, Commons
+  // geotagged thumbnails, or an explicitly marked source. Curated Unsplash
+  // keyword picks do not count.
+  if ((item?.meta_data as any)?.image_source === 'commons') return true;
+  if ((item?.meta_data as any)?.image_source === 'serpapi') return true;
+  if (typeof item?.image_url === 'string' && item.image_url.includes('upload.wikimedia.org')) return true;
+  if (typeof (item?.meta_data as any)?.restaurant?.image_url === 'string') return true;
+  return false;
+}
+
+async function fetchRealImageForActivity(params: {
+  title: string; destName: string;
+}): Promise<string | null> {
+  // One real relevance-ranked provider photo for an activity title. Null when
+  // the provider has nothing (caller keeps the existing catalog image).
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const base = getFastApiBase();
+    const query = new URLSearchParams();
+    query.set('location', params.title);
+    query.set('destination', params.destName);
+    const res = await fetch(`${base}/api/places/image?${query.toString()}`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    const url = body?.image_url;
+    return typeof url === 'string' && url.startsWith('https://') ? url : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function applyRealImagesToActivities(itinerary: any[], destName: string): Promise<void> {
+  if (!itinerary) return;
+  // Replace curated stock photos on activity/sightseeing/leisure/meal items
+  // with real provider photos. Items already carrying a real image
+  // are skipped; failures keep the existing image. Bounded concurrency (4)
+  // plus a shared per-location cache keep trip generation fast.
+  const targets = itinerary.filter(
+    (i) =>
+      (i.item_type === 'activity' ||
+        i.item_type === 'sightseeing' ||
+        i.item_type === 'leisure' ||
+        i.item_type === 'meal') &&
+      !i.is_disabled &&
+      !hasRealImage(i),
+  );
+  if (targets.length === 0) return;
+  const cache = new Map<string, Promise<string | null>>();
+  const keyOf = (item: any) => `${String(item.title || '').trim().toLowerCase()}`;
+  const lookup = (item: any): Promise<string | null> => {
+    const key = keyOf(item);
+    let pending = cache.get(key);
+    if (!pending) {
+      pending = fetchRealImageForActivity({ title: String(item.title || destName), destName });
+      cache.set(key, pending);
+    }
+    return pending;
+  };
+  for (let batch = 0; batch < targets.length; batch += 4) {
+    const slice = targets.slice(batch, batch + 4);
+    const settled = await Promise.allSettled(slice.map((item) => lookup(item)));
+    settled.forEach((result, idx) => {
+      if (result.status !== 'fulfilled' || !result.value) return;
+      slice[idx].image_url = result.value;
+      markRealImage(slice[idx], 'serpapi');
+    });
+  }
+}
+
+function attachRestaurantToMeal(item: any, restaurant: any, meal: string, destName: string): void {
+  const name = String(restaurant.name).trim();
+  const mealLabel = meal.charAt(0).toUpperCase() + meal.slice(1);
+  item.title = `${mealLabel} at ${name}`;
+  item.location = restaurant.address || destName;
+  if (restaurant.image_url) {
+    item.image_url = restaurant.image_url;
+    markRealImage(item, 'serpapi');
+  }
+  const ratingBits: string[] = [];
+  if (restaurant.rating != null) ratingBits.push(`rated ${restaurant.rating}${restaurant.reviews_count != null ? ` (${restaurant.reviews_count} reviews)` : ''}`);
+  item.description = `Live verified ${meal} spot in ${destName}${ratingBits.length ? `, ${ratingBits.join(' ')}` : ''}.`;
+  item.meta_data = {
+    ...(item.meta_data || {}),
+    restaurant: {
+      name,
+      address: restaurant.address || null,
+      rating: restaurant.rating ?? null,
+      reviews_count: restaurant.reviews_count ?? null,
+      place_id: restaurant.place_id || null,
+      latitude: restaurant.latitude ?? null,
+      longitude: restaurant.longitude ?? null,
+      website: restaurant.website || null,
+      phone: restaurant.phone || null,
+      hours: restaurant.hours || null,
+      image_url: restaurant.image_url || null,
+      source: 'serpapi',
+    },
+  };
+}
+
+// Radius comes from `./src/server/restaurantMatching`.
+
+async function applyLiveRestaurantsToItinerary(
+  itinerary: any[],
+  restaurants: any[],
+  destName: string,
+  opts?: { cuisine?: string | null },
+): Promise<void> {
+  if (!itinerary) return;
+  // Location-aware matching: every meal is anchored to its neighbouring
+  // activity (previous first, then next). The shared SerpApi pool is ranked
+  // by real distance to that anchor; a targeted anchor search runs only when
+  // no suitable nearby venue exists. Times, ordering, and costs are
+  // preserved; only verifiable provider fields are stored. No venue invented.
+  const pool: any[] = (restaurants || []).filter(
+    (r) => r && typeof r.name === 'string' && r.name.trim(),
+  );
+  const usedIds = new Set<string>();
+  const meals = itinerary.filter((i) => i.item_type === 'meal' && !i.is_disabled);
+  for (const item of meals) {
+    const meal = mealTypeForItem(item) || 'meal';
+    const anchor = anchorForMeal(itinerary, item);
+    const unused = pool.filter((r) => !usedIds.has(String(r.id || r.name)));
+    let ranked = rankRestaurantsForAnchor(unused, anchor, opts?.cuisine);
+    let pick = ranked[0] || null;
+    const suitable =
+      pick &&
+      (anchor.latitude === null ||
+        anchor.longitude === null ||
+        pick.distanceKm === null ||
+        pick.distanceKm <= RESTAURANT_ANCHOR_RADIUS_KM);
+    if (!suitable && anchor.text) {
+      // Existing pool has nothing nearby: search around the anchor activity.
+      const fresh = await fetchRestaurantsForAnchor({
+        anchorText: anchor.text,
+        destName,
+        meal,
+        latitude: anchor.latitude,
+        longitude: anchor.longitude,
+        cuisine: opts?.cuisine,
+      });
+      for (const candidate of fresh) {
+        if (!candidate || typeof candidate.name !== 'string' || !candidate.name.trim()) continue;
+        const key = String(candidate.id || candidate.name);
+        if (pool.some((r) => String(r.id || r.name) === key)) continue;
+        pool.push(candidate);
+      }
+      const refreshed = pool.filter((r) => !usedIds.has(String(r.id || r.name)));
+      ranked = rankRestaurantsForAnchor(refreshed, anchor, opts?.cuisine);
+      pick = ranked[0] || null;
+    }
+    if (!pick) {
+      // Last resort: nearest already-used venue rather than an invented one.
+      const fallback = rankRestaurantsForAnchor(pool, anchor, opts?.cuisine)[0] || null;
+      if (!fallback) continue;
+      pick = fallback;
+    }
+    usedIds.add(String(pick.restaurant.id || pick.restaurant.name));
+    attachRestaurantToMeal(item, pick.restaurant, meal, destName);
+  }
 }
 
 // ----------------------------------------------------
@@ -1892,6 +2114,17 @@ async function buildCanonicalTripAsync(params: {
   // 3a. Overlay real verified places onto activity slots (names + images only;
   // times, ordering, and estimated costs are preserved).
   applyLivePlacesToItinerary(itinerary, liveEnrichment.places, destObj.name);
+
+  // 3a2. Overlay real SerpApi restaurants onto meal slots (best-effort,
+  // location-aware: each meal anchors to its neighbouring activity; the
+  // itinerary continues without restaurant data when the provider is empty).
+  await applyLiveRestaurantsToItinerary(itinerary, liveEnrichment.restaurants, destObj.name, {
+    cuisine: params.preferences?.cuisine || null,
+  });
+
+  // 3a3. Swap remaining curated stock photos for real geotagged provider
+  // photos (best-effort; items keep their catalog image when unavailable).
+  await applyRealImagesToActivities(itinerary, destObj.name);
 
   // 3b. Compute Multi-Hotel 5km Radius Split Allocations
   const finalDailyAccommodations = resolveDailySplitAccommodations({
@@ -4280,6 +4513,28 @@ app.get('/api/hotels/search', async (req: Request, res: Response) => {
   const query = new URLSearchParams(req.query as Record<string, string>).toString();
   try {
     const upstream = await fetch(`${FASTAPI_BASE_URL}/api/hotels/search?${query}`);
+    const text = await upstream.text();
+    res.status(upstream.status).type('application/json').send(text);
+  } catch (err) {
+    res.status(502).json({ detail: 'FastAPI backend is not reachable. Start it with: python -m uvicorn backend.main:app --port 8000' });
+  }
+});
+
+app.get('/api/restaurants/search', async (req: Request, res: Response) => {
+  const query = new URLSearchParams(req.query as Record<string, string>).toString();
+  try {
+    const upstream = await fetch(`${FASTAPI_BASE_URL}/api/restaurants/search?${query}`);
+    const text = await upstream.text();
+    res.status(upstream.status).type('application/json').send(text);
+  } catch (err) {
+    res.status(502).json({ detail: 'FastAPI backend is not reachable. Start it with: python -m uvicorn backend.main:app --port 8000' });
+  }
+});
+
+app.get('/api/places/image', async (req: Request, res: Response) => {
+  const query = new URLSearchParams(req.query as Record<string, string>).toString();
+  try {
+    const upstream = await fetch(`${FASTAPI_BASE_URL}/api/places/image?${query}`);
     const text = await upstream.text();
     res.status(upstream.status).type('application/json').send(text);
   } catch (err) {
