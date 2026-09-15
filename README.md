@@ -737,6 +737,31 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-16 Landing-Page Auth Placement + Console Trip Handoff
+
+Inspected:
+
+- MAIN traveler experience is `AIChatConsole` (`ai_console` tab: chat-driven creation, own `generatedTrip` state, native TourFlow header). Landing tab renders `HeroLanding` (own dark-hero header + slide-out drawer, no auth) above `IndiaLandingExperience` (content only, no header). Old `TravelerWorkspace` ("My Trips & Canvas") stays reachable via Navbar workspace tab and console exit; navigation is state-driven tabs (no router) — nothing deleted or re-routed.
+
+Changed (no new auth system, no backend changes, no duplicate modal/store):
+
+- `HeroLanding` header: Sign In (ghost) + Sign Up (solid) buttons when anonymous, name chip (+ mobile initial chip) + Sign Out when authenticated, hamburger retained; standalone Operator Portal button removed from the header. Hero, prompt box, and planning cards untouched.
+- Drawer: new My Trips entry (opens `TravelerMyTrips` slide-over, persistent backend trips) plus a visually separated Operations section with the Operator Portal entry (same `onSwitchToOperator` flow as before). All existing drawer entries kept.
+- Trip handoff (existing payload-handoff pattern): `App` holds `consoleInitialTrip`; drawer My Trips → `onOpenTripInConsole` → `ai_console` tab; `AIChatConsole` consumes `initialTrip` once (id-guarded ref, packing/expenses synced, toast, `onInitialTripConsumed` clears) and displays it without regenerating.
+
+Files modified:
+
+- `src/components/HeroLanding.tsx`, `src/App.tsx`, `src/components/AIChatConsole.tsx`, `README.md`
+
+Tests/checks performed:
+
+- Static checkpoint audit: landing Sign In/Sign Up present without prompt; both open existing `TravelerAuthModal` modes; header flips to name chip on login; hamburger + drawer intact; Operator only in drawer (header button gone); My Trips uses persistent APIs (get/list/restore, live-verified previously); anonymous + authenticated creation paths untouched (live-verified previously; backend suite 4/4 auth+comms green this round on fresh DB).
+- `npm run lint` (`tsc --noEmit`): passed. `npm run build`: passed. `git diff --check`: clean.
+
+Known remaining issues:
+
+- Browser-click verification not possible from this environment; header/drawer behavior verified by code audit + compile. tsx dev Express occasionally drops a keep-alive connection under rapid scripted requests (retries succeed).
+
 ### 2026-09-15 Traveler Auth + Trip Ownership (Backend)
 
 Inspected:

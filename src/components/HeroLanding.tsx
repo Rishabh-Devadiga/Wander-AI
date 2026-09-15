@@ -1,24 +1,31 @@
 import React, { useState, FormEvent } from 'react';
 import { motion } from 'motion/react';
-import { 
-  Sparkles, 
-  ArrowRight, 
-  Plus, 
-  Car, 
-  Zap, 
-  Menu, 
-  X, 
-  Layers, 
-  MessageSquare, 
-  MapPin, 
-  Hotel, 
-  Compass, 
-  Globe, 
+import {
+  Sparkles,
+  ArrowRight,
+  Plus,
+  Car,
+  Zap,
+  Menu,
+  X,
+  Layers,
+  MessageSquare,
+  MapPin,
+  Hotel,
+  Compass,
+  Globe,
   Heart,
   ChevronRight,
-  Shield
+  Shield,
+  LogIn,
+  LogOut,
+  User,
+  FolderOpen,
+  UserPlus
 } from 'lucide-react';
-import { Destination } from '../types/tourflow';
+import { Destination, Trip } from '../types/tourflow';
+import { useTravelerAuth } from '../store/useTravelerAuth';
+import TravelerMyTrips from './TravelerMyTrips';
 
 interface HeroLandingProps {
   destinations: Destination[];
@@ -29,6 +36,7 @@ interface HeroLandingProps {
   onNavigateTab?: (tab: 'landing' | 'workspace' | 'destinations' | 'catalog' | 'ai_console') => void;
   onOpenMenuDrawer?: () => void;
   onSwitchToOperator?: () => void;
+  onOpenTripInConsole?: (trip: Trip) => void;
 }
 
 export default function HeroLanding({
@@ -39,9 +47,16 @@ export default function HeroLanding({
   onStartChatWithPrompt,
   onNavigateTab,
   onSwitchToOperator,
+  onOpenTripInConsole,
 }: HeroLandingProps) {
   const [heroPrompt, setHeroPrompt] = useState('');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isMyTripsOpen, setIsMyTripsOpen] = useState(false);
+  const travelerUser = useTravelerAuth((s) => s.user);
+  const travelerStatus = useTravelerAuth((s) => s.status);
+  const openAuthModal = useTravelerAuth((s) => s.openAuthModal);
+  const travelerLogout = useTravelerAuth((s) => s.logout);
+  const isSignedIn = travelerStatus === 'authenticated' && !!travelerUser;
 
   const handlePromptSubmit = (e?: FormEvent) => {
     if (e) e.preventDefault();
@@ -136,19 +151,51 @@ export default function HeroLanding({
           </span>
         </div>
 
-        {/* Right Actions: Operator Switcher + Hamburger */}
+        {/* Right Actions: Traveler auth + Hamburger (Operator lives in the menu) */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {onSwitchToOperator && (
-            <button
-              id="hero-switch-to-operator-btn"
-              onClick={onSwitchToOperator}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-950/80 hover:bg-slate-900 text-white font-bold text-xs border border-emerald-500/40 shadow-lg backdrop-blur-md transition-all cursor-pointer"
-            >
-              <Shield className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">Operator Portal</span>
-              <span className="sm:hidden">Operator</span>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            </button>
+          {isSignedIn && travelerUser ? (
+            <>
+              <span
+                title={travelerUser.email}
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/15 hover:bg-white/25 border border-white/40 text-white text-xs font-bold backdrop-blur-md transition-all max-w-[160px]"
+              >
+                <User className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{travelerUser.full_name}</span>
+              </span>
+              <span
+                title={travelerUser.email}
+                className="sm:hidden w-9 h-9 rounded-full bg-white/15 border border-white/40 text-white flex items-center justify-center text-xs font-black backdrop-blur-md"
+              >
+                {(travelerUser.full_name || 'T').trim().charAt(0).toUpperCase()}
+              </span>
+              <button
+                id="hero-sign-out-btn"
+                onClick={travelerLogout}
+                title="Sign out"
+                className="p-2.5 rounded-full text-white hover:bg-white/15 border border-white/30 transition-all cursor-pointer drop-shadow-md active:scale-95"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                id="hero-sign-in-btn"
+                onClick={() => openAuthModal('login')}
+                className="flex items-center gap-1.5 px-3.5 sm:px-4 py-1.5 rounded-full text-white font-bold text-xs border border-white/50 hover:bg-white/15 backdrop-blur-md transition-all cursor-pointer active:scale-95"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In</span>
+              </button>
+              <button
+                id="hero-sign-up-btn"
+                onClick={() => openAuthModal('signup')}
+                className="flex items-center gap-1.5 px-3.5 sm:px-4 py-1.5 rounded-full bg-white hover:bg-stone-100 text-stone-900 font-bold text-xs shadow-lg transition-all cursor-pointer active:scale-95"
+              >
+                <UserPlus className="w-3.5 h-3.5 text-[#7065F0]" />
+                <span>Sign Up</span>
+              </button>
+            </>
           )}
 
           <button
@@ -431,7 +478,45 @@ export default function HeroLanding({
                   </div>
                   <ChevronRight className="w-4 h-4 text-stone-400" />
                 </button>
+
+                <button
+                  id="drawer-my-trips-btn"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    setIsMyTripsOpen(true);
+                  }}
+                  className="w-full p-3 rounded-2xl hover:bg-white/10 text-left font-semibold text-sm flex items-center justify-between text-stone-200 hover:text-white transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-3">
+                    <FolderOpen className="w-5 h-5 text-violet-400" />
+                    <span>My Trips</span>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-stone-400" />
+                </button>
               </nav>
+
+              {/* Separated Operator access */}
+              {onSwitchToOperator && (
+                <div className="pt-4 border-t border-white/10">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-stone-500 px-1 mb-2">
+                    Operations
+                  </div>
+                  <button
+                    id="drawer-operator-portal-btn"
+                    onClick={() => {
+                      setIsMenuOpen(false);
+                      onSwitchToOperator();
+                    }}
+                    className="w-full p-3 rounded-2xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-left font-bold text-sm flex items-center justify-between text-emerald-200 transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Shield className="w-5 h-5 text-emerald-400" />
+                      <span>Operator Portal</span>
+                    </div>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  </button>
+                </div>
+              )}
 
               {/* Action Button inside Drawer */}
               <div className="pt-4 border-t border-white/10">
@@ -461,6 +546,16 @@ export default function HeroLanding({
           </motion.div>
         </div>
       )}
+
+      {/* My Trips slide-over (persistent account trips; opens into the MAIN console) */}
+      <TravelerMyTrips
+        open={isMyTripsOpen}
+        onClose={() => setIsMyTripsOpen(false)}
+        onOpenTrip={(trip) => {
+          setIsMyTripsOpen(false);
+          if (onOpenTripInConsole) onOpenTripInConsole(trip);
+        }}
+      />
 
     </div>
   );

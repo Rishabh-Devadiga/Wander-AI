@@ -31,6 +31,8 @@ interface AIChatConsoleProps {
   initialDestination?: string;
   initialDuration?: string;
   initialPayload?: any;
+  initialTrip?: Trip | null;
+  onInitialTripConsumed?: () => void;
   destinations?: Destination[];
   onAutoFillTrip?: (extracted: Record<string, any>) => void;
   onNavigateToWorkspace?: () => void;
@@ -57,6 +59,8 @@ export default function AIChatConsole({
   initialDestination,
   initialDuration,
   initialPayload,
+  initialTrip,
+  onInitialTripConsumed,
   destinations = [],
   onAutoFillTrip, 
   onNavigateToWorkspace,
@@ -282,6 +286,24 @@ export default function AIChatConsole({
   }, [initialDestination, initialDuration]);
 
   const hasHandledPayload = useRef(false);
+  const handledInitialTripId = useRef<string | null>(null);
+
+  // Trip restored from My Trips (already persisted + rehydrated): display it
+  // directly. Never regenerate here.
+  useEffect(() => {
+    if (initialTrip && initialTrip.id && handledInitialTripId.current !== initialTrip.id) {
+      handledInitialTripId.current = initialTrip.id;
+      setGeneratedTrip(initialTrip);
+      if (initialTrip.packing_items) setPackingItems(initialTrip.packing_items);
+      if (initialTrip.expenses) setExpenses(initialTrip.expenses);
+      setWorkspaceState('generated');
+      setMobileTab('trip');
+      markTripSaved(initialTrip.id);
+      showToast('Trip restored from My Trips.');
+      onInitialTripConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTrip]);
 
   // Initial payload handoff from "Generate Itinerary with WanderFlow AI"
   useEffect(() => {

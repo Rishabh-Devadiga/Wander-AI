@@ -54,6 +54,14 @@ export default function App() {
   const [chatInitialDestination, setChatInitialDestination] = useState<string | undefined>(undefined);
   const [chatInitialDuration, setChatInitialDuration] = useState<string | undefined>(undefined);
   const [chatInitialPayload, setChatInitialPayload] = useState<any>(null);
+  // Trip restored from My Trips (already persisted; the console displays it
+  // directly without regenerating).
+  const [consoleInitialTrip, setConsoleInitialTrip] = useState<Trip | null>(null);
+
+  const handleOpenTripInConsole = (trip: Trip) => {
+    setConsoleInitialTrip(trip);
+    setActiveTab('ai_console');
+  };
 
   useEffect(() => {
     loadDestinations();
@@ -186,6 +194,7 @@ export default function App() {
                 onStartChatWithPrompt={handleStartChatWithPrompt}
                 onNavigateTab={setActiveTab}
                 onSwitchToOperator={handleSwitchToOperator}
+                onOpenTripInConsole={handleOpenTripInConsole}
               />
               <IndiaLandingExperience
                 destinations={destinations}
@@ -236,6 +245,8 @@ export default function App() {
               initialDestination={chatInitialDestination}
               initialDuration={chatInitialDuration}
               initialPayload={chatInitialPayload}
+              initialTrip={consoleInitialTrip}
+              onInitialTripConsumed={() => setConsoleInitialTrip(null)}
               destinations={destinations}
               onAutoFillTrip={handleAutoFillFromAI}
               onOpenEditPreferences={handleOpenEditPreferences}
