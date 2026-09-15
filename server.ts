@@ -4655,6 +4655,74 @@ app.get('/api/places/image', async (req: Request, res: Response) => {
   }
 });
 
+// ----------------------------------------------------
+// Operations consoles proxy (canonical state lives in FastAPI + database;
+// Express forwards so the same-origin frontend always reaches it).
+// ----------------------------------------------------
+const OPS_PROXY_ROUTES: Array<{ method: 'get' | 'post' | 'put'; path: string }> = [
+  { method: 'get', path: '/api/ops/accommodations' },
+  { method: 'get', path: '/api/ops/accommodations/:tripId' },
+  { method: 'post', path: '/api/ops/accommodations' },
+  { method: 'put', path: '/api/ops/accommodations/:tripId' },
+  { method: 'put', path: '/api/ops/accommodations/:tripId/rooms' },
+  { method: 'post', path: '/api/ops/accommodations/:tripId/flag-issue' },
+  { method: 'post', path: '/api/ops/accommodations/:tripId/resolve-issue' },
+  { method: 'get', path: '/api/ops/properties' },
+  { method: 'get', path: '/api/ops/properties/:hotelId/trips' },
+  { method: 'get', path: '/api/ops/vehicles' },
+  { method: 'post', path: '/api/ops/vehicles' },
+  { method: 'get', path: '/api/ops/drivers' },
+  { method: 'post', path: '/api/ops/drivers' },
+  { method: 'get', path: '/api/ops/transport' },
+  { method: 'get', path: '/api/ops/transport/:tripId' },
+  { method: 'post', path: '/api/ops/transport' },
+  { method: 'put', path: '/api/ops/transport/:tripId' },
+  { method: 'put', path: '/api/ops/transport/:tripId/timing' },
+  { method: 'post', path: '/api/ops/transport/:tripId/status' },
+  { method: 'post', path: '/api/ops/transport/:tripId/notify' },
+  { method: 'get', path: '/api/ops/activities' },
+  { method: 'get', path: '/api/ops/activities/:assignmentId' },
+  { method: 'post', path: '/api/ops/activities' },
+  { method: 'put', path: '/api/ops/activities/:assignmentId' },
+  { method: 'put', path: '/api/ops/activities/:assignmentId/allocation' },
+  { method: 'post', path: '/api/ops/activities/:assignmentId/confirm' },
+  { method: 'post', path: '/api/ops/activities/:assignmentId/flag-issue' },
+  { method: 'post', path: '/api/ops/activities/:assignmentId/resolve-issue' },
+  { method: 'get', path: '/api/ops/activity-inventory/:activityId/vendors' },
+  { method: 'post', path: '/api/ops/vendors' },
+  { method: 'get', path: '/api/ops/vendors/:vendorId/assignments' },
+  { method: 'get', path: '/api/ops/vendors' },
+  { method: 'post', path: '/api/ops/vendors/:vendorId/verify' },
+  { method: 'get', path: '/api/ops/activity-inventory' },
+  { method: 'post', path: '/api/ops/trips/:tripId/approve' },
+  { method: 'post', path: '/api/ops/trips/:tripId/accept' },
+  { method: 'get', path: '/api/ops/trips/:tripId/pipeline' },
+  { method: 'get', path: '/api/ops/approvals' },
+  { method: 'post', path: '/api/ops/trips/:tripId/finalize' },
+];
+
+for (const route of OPS_PROXY_ROUTES) {
+  (app as any)[route.method](route.path, async (req: Request, res: Response) => {
+    try {
+      let upstreamPath = req.path;
+      const query = new URLSearchParams(req.query as Record<string, string>).toString();
+      if (query) upstreamPath += `?${query}`;
+      const init: RequestInit = {
+        method: req.method,
+        headers: { 'Content-Type': 'application/json' },
+      };
+      if (req.method !== 'GET' && req.body !== undefined) {
+        init.body = JSON.stringify(req.body);
+      }
+      const upstream = await fetch(`${FASTAPI_BASE_URL}${upstreamPath}`, init);
+      const text = await upstream.text();
+      res.status(upstream.status).type('application/json').send(text);
+    } catch (err) {
+      res.status(502).json({ detail: 'FastAPI backend is not reachable. Start it with: python -m uvicorn backend.main:app --port 8000' });
+    }
+  });
+}
+
 app.post('/api/trips/:id/select-hotel', (req: Request, res: Response) => {
   const { id } = req.params;
   const { day_number, property_token, name, location, image_url, description,
@@ -4699,6 +4767,140 @@ app.post('/api/trips/:id/select-hotel', (req: Request, res: Response) => {
   trip.updated_at = new Date().toISOString();
   tripsStore[tripIndex] = trip;
   res.json(trip);
+});
+
+// ----------------------------------------------------
+// Traveler Trip Confirmation (planning -> confirmed, idempotent)
+// Canonical for traveler trips in this store: validates completeness,
+// persists status + confirmation audit trail, and notifies. Reconfirming
+// returns the existing confirmed state without duplicating rows.
+// No ops assignments are fabricated here; operators attach real inventory
+// through the dispatch consoles afterwards.
+// ----------------------------------------------------
+app.post('/api/trips/:id/confirm', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { user_id } = req.body || {};
+
+  const tripIndex = tripsStore.findIndex((t) => t.id === id);
+  if (tripIndex === -1) return res.status(404).json({ detail: 'Trip not found' });
+
+  const trip = tripsStore[tripIndex];
+  const owner = trip.user_id || 'usr-traveler-001';
+  if (user_id && user_id !== owner) {
+    return res.status(403).json({ detail: 'Trip does not belong to this traveler' });
+  }
+
+  if (trip.status === 'confirmed') {
+    return res.json({ success: true, already_confirmed: true, confirmed_at: trip.confirmed_at || null, trip });
+  }
+  if (trip.status !== 'planning') {
+    return res.status(422).json({ detail: `Only planning trips can be confirmed (current: ${trip.status})` });
+  }
+  if (!trip.destination?.name) {
+    return res.status(422).json({ detail: 'Trip has no destination' });
+  }
+  if (!trip.start_date || !trip.end_date) {
+    return res.status(422).json({ detail: 'Trip dates are required before confirmation' });
+  }
+  if (new Date(trip.end_date).getTime() < new Date(trip.start_date).getTime()) {
+    return res.status(422).json({ detail: 'Trip end date is before start date' });
+  }
+  if (!trip.traveler_count || trip.traveler_count < 1) {
+    return res.status(422).json({ detail: 'Traveler count must be at least 1' });
+  }
+  const items = trip.itinerary || [];
+  if (items.length === 0) {
+    return res.status(422).json({ detail: 'Trip has no itinerary items to confirm' });
+  }
+  for (const item of items) {
+    if (!item.title || !String(item.title).trim()) {
+      return res.status(422).json({ detail: 'Itinerary contains an untitled item' });
+    }
+    if ((item.cost || 0) < 0) {
+      return res.status(422).json({ detail: 'Itinerary contains a negative cost' });
+    }
+  }
+
+  const now = new Date().toISOString();
+  trip.status = 'confirmed';
+  trip.confirmed_at = now;
+  trip.confirmed_by = owner;
+  trip.updated_at = now;
+
+  trip.change_history = [
+    {
+      id: `chg-${Date.now()}`,
+      trip_id: trip.id,
+      changed_by: 'user',
+      action: 'trip_confirmed',
+      field_changed: 'status',
+      old_value: 'planning',
+      new_value: 'confirmed',
+      reason: 'Traveler reviewed and confirmed the trip for operations',
+      timestamp: now,
+    },
+    ...(trip.change_history || []),
+  ];
+
+  if (!trip.notifications) trip.notifications = [];
+  trip.notifications.push({
+    id: `notif-${Date.now()}`,
+    trip_id: trip.id,
+    user_id: owner,
+    title: 'Trip Confirmed',
+    message: `Trip '${trip.title}' (${trip.id}) is confirmed and visible to the operations team.`,
+    type: 'success',
+    is_read: false,
+    created_at: now,
+  });
+
+  tripsStore[tripIndex] = trip;
+  res.json({ success: true, already_confirmed: false, confirmed_at: now, trip });
+});
+
+// ----------------------------------------------------
+// Operator note on a trip (traveler-visible inbox row).
+// Used after backend finalization so the traveler sees the outcome
+// in this store. Returns the persisted notification row.
+// ----------------------------------------------------
+app.post('/api/trips/:id/operator-note', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { title, message, type } = req.body || {};
+  const tripIndex = tripsStore.findIndex((t) => t.id === id);
+  if (tripIndex === -1) return res.status(404).json({ detail: 'Trip not found' });
+  if (!title || !String(title).trim() || !message || !String(message).trim()) {
+    return res.status(422).json({ detail: 'title and message are required' });
+  }
+  const trip = tripsStore[tripIndex];
+  const now = new Date().toISOString();
+  const note = {
+    id: `notif-${Date.now()}`,
+    trip_id: trip.id,
+    user_id: trip.user_id || 'usr-traveler-001',
+    title: String(title).slice(0, 255),
+    message: String(message).slice(0, 2000),
+    type: ['info', 'success', 'warning', 'update'].includes(type) ? type : 'update',
+    is_read: false,
+    created_at: now,
+  };
+  if (!trip.notifications) trip.notifications = [];
+  trip.notifications.push(note);
+  trip.change_history = [
+    {
+      id: `chg-${Date.now()}`,
+      trip_id: trip.id,
+      changed_by: 'operator',
+      action: 'operator_note',
+      field_changed: 'notifications',
+      new_value: note.title,
+      reason: 'Operator operations update',
+      timestamp: now,
+    },
+    ...(trip.change_history || []),
+  ];
+  trip.updated_at = now;
+  tripsStore[tripIndex] = trip;
+  res.status(201).json(note);
 });
 
 // ----------------------------------------------------

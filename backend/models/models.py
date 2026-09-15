@@ -136,6 +136,9 @@ class Activity(Base):
     currency = Column(String(10), default="INR")
     difficulty_level = Column(String(50), default="moderate")  # easy, moderate, challenging
     rating = Column(Float, default=4.7)
+    # Operational group capacity per session. NULL means unknown/unlimited --
+    # allocation is still recorded but no cap is enforced.
+    capacity = Column(Integer, nullable=True)
     images = Column(JSON, default=list)
     description = Column(Text, nullable=True)
     meeting_point = Column(String(500), nullable=True)
@@ -204,6 +207,10 @@ class Trip(Base):
     traveler_count = Column(Integer, default=2)
     pace = Column(String(50), default="balanced")  # relaxed, balanced, packed
     discovery_session_id = Column(String(64), nullable=True, index=True)
+    # Traveler confirmation (planning -> confirmed). Set once by the confirm
+    # endpoint; repeated confirms are idempotent and never duplicate rows.
+    confirmed_at = Column(DateTime, nullable=True)
+    confirmed_by = Column(String(36), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -344,3 +351,134 @@ class Review(Base):
 
     trip = relationship("Trip", back_populates="reviews")
     user = relationship("User", back_populates="reviews")
+
+
+# ---------------------------------------------------------------------------
+# Operations: fleet inventory and trip-centric assignments.
+#
+# Assignments key trips (by trip_id string, unique per assignment table) to
+# real inventory rows. Statuses are persisted and recomputed by backend
+# business rules on every mutation -- never invented in the frontend.
+# ---------------------------------------------------------------------------
+
+class Vehicle(Base):
+    __tablename__ = "vehicles"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    name = Column(String(255), nullable=False, index=True)
+    registration_number = Column(String(50), nullable=False, unique=True, index=True)
+    vehicle_type = Column(String(50), nullable=False, default="private_cab")
+    capacity = Column(Integer, default=4)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    transport_assignments = relationship("TransportAssignment", back_populates="vehicle")
+
+
+class Driver(Base):
+    __tablename__ = "drivers"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    name = Column(String(255), nullable=False, index=True)
+    phone = Column(String(50), nullable=True)
+    license_number = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    transport_assignments = relationship("TransportAssignment", back_populates="driver")
+
+
+class AccommodationAssignment(Base):
+    """Trip-centric hotel assignment. One row per trip (trip_id unique)."""
+
+    __tablename__ = "accommodation_assignments"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    trip_id = Column(String(255), nullable=False, unique=True, index=True)
+    hotel_id = Column(String(36), ForeignKey("hotels.id", ondelete="SET NULL"), nullable=True, index=True)
+    rooms = Column(Integer, nullable=True)
+    room_type = Column(String(255), nullable=True)
+    check_in_date = Column(String(10), nullable=True)  # YYYY-MM-DD
+    check_out_date = Column(String(10), nullable=True)  # YYYY-MM-DD
+    # pending | assigned | issue (derived by backend rules; flaggable by operator)
+    status = Column(String(50), default="pending", nullable=False, index=True)
+    issue_reason = Column(Text, nullable=True)
+    updated_by = Column(String(50), default="operator")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    hotel = relationship("Hotel")
+
+
+class TransportAssignment(Base):
+    """Trip-centric dispatch assignment. One row per trip (trip_id unique)."""
+
+    __tablename__ = "transport_assignments"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    trip_id = Column(String(255), nullable=False, unique=True, index=True)
+    vehicle_id = Column(String(36), ForeignKey("vehicles.id", ondelete="SET NULL"), nullable=True, index=True)
+    driver_id = Column(String(36), ForeignKey("drivers.id", ondelete="SET NULL"), nullable=True, index=True)
+    origin = Column(String(255), nullable=True)
+    destination = Column(String(255), nullable=True)
+    pickup_at = Column(DateTime, nullable=True)
+    dropoff_at = Column(DateTime, nullable=True)
+    # pending | assigned | en_route | completed | delayed (lifecycle validated)
+    status = Column(String(50), default="pending", nullable=False, index=True)
+    # Status before a delay; used to resolve back after a delay.
+    pre_delay_status = Column(String(50), nullable=True)
+    delay_reason = Column(Text, nullable=True)
+    updated_by = Column(String(50), default="operator")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    vehicle = relationship("Vehicle", back_populates="transport_assignments")
+    driver = relationship("Driver", back_populates="transport_assignments")
+
+
+class ActivityAssignment(Base):
+    """Trip-centric activity dispatch row. Many rows per trip are allowed."""
+
+    __tablename__ = "activity_assignments"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    trip_id = Column(String(255), nullable=False, index=True)
+    activity_id = Column(String(36), ForeignKey("activities.id", ondelete="CASCADE"), nullable=False, index=True)
+    vendor_id = Column(String(36), ForeignKey("vendors.id", ondelete="SET NULL"), nullable=True, index=True)
+    scheduled_date = Column(String(10), nullable=True)  # YYYY-MM-DD
+    start_time = Column(String(5), nullable=True)  # HH:MM 24h
+    end_time = Column(String(5), nullable=True)  # HH:MM 24h
+    participants = Column(Integer, nullable=True)
+    # pending | confirmed | issue (confirm-validated; flaggable by operator)
+    status = Column(String(50), default="pending", nullable=False, index=True)
+    issue_reason = Column(Text, nullable=True)
+    updated_by = Column(String(50), default="operator")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    activity = relationship("Activity")
+    vendor = relationship("Vendor")
+
+
+class TripApproval(Base):
+    """Operator pipeline gate for one trip (trip_id unique, opaque key).
+
+    Stages: traveler-confirmed (no row) -> approved -> accepted
+    (assignment started) -> finalized (assignments locked). Assignment
+    mutations require approval; all mutations are rejected once finalized.
+    """
+
+    __tablename__ = "trip_approvals"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    trip_id = Column(String(255), nullable=False, unique=True, index=True)
+    approved = Column(Boolean, default=False, nullable=False)
+    approved_at = Column(DateTime, nullable=True)
+    approved_by = Column(String(50), nullable=True)
+    assignment_started = Column(Boolean, default=False, nullable=False)
+    assignment_started_at = Column(DateTime, nullable=True)
+    finalized = Column(Boolean, default=False, nullable=False)
+    finalized_at = Column(DateTime, nullable=True)
+    finalized_by = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

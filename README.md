@@ -737,6 +737,388 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-15 Traveler Schedule Carry-Over for Activity Assignment
+
+Inspected:
+
+- Reported empty START/END when creating an assignment from a decided traveler activity. The traveler-selection rows already display full schedules (Day N + times), but "Create assignment" dropped them. Correction to the previous entry: per-activity traveler times DO exist on itinerary items (day_number + start/end), reviewed in the traveler UI and locked by trip confirmation.
+
+Changed:
+
+- `travelerActivityRows()` now also resolves `scheduledDate` (Day N mapped onto the traveler's trip start date), `startTimeHHMM`/`endTimeHHMM` (12h→24h tolerant conversion) via new pure `toHHMM()`/`travelerDayToDate()` helpers. Unparseable/missing values resolve to null/empty, never invented.
+- "Create assignment" on a traveler row prefills trip + date + times + participants; only inventory activity + vendor remain operator choices. A hint line states the carried schedule. Blank-header Assign keeps the trip-start default. Backend validation unchanged.
+
+Files modified:
+
+- `src/utils/opsViewModels.ts`
+- `src/components/operator/OperatorVendors.tsx`
+- `README.md`
+
+Tests/checks performed:
+
+- Node runtime checks on the carry-over (12h/24h/midnight conversions, garbage/empty guards, Day 1/2 → dates, row resolution): passed. `npm.cmd run lint`: passed. `npm.cmd run build`: passed; hint string verified in the production bundle. No backend changes.
+- Restarted `npm run dev` onto the new code; health OK.
+
+### 2026-09-15 Activity Dialog Traveler-Date Prefill
+
+Inspected:
+
+- Reported empty DATE/START/END in Assign Activity dialog. The trip dropdown only prefilled participants; dates stayed blank. Transport dialog already prefilled pickup/drop from trip dates; only Activities lacked it.
+
+Changed:
+
+- Selecting a trip in the Assign Activity dialog now prefills DATE with the traveler's trip start date and participants with the party size (both only when the fields are still empty, so operator edits win). START/END stay empty deliberately: no per-activity traveler times exist anywhere in the data model, and inventing 09:00 defaults would fabricate schedule data. A hint line states the date source. Same pattern as the hotel prefill; no backend changes (validation unchanged).
+
+Files modified:
+
+- `src/components/operator/OperatorVendors.tsx`
+- `README.md`
+
+Tests/checks performed:
+
+- `npm.cmd run lint` (`tsc --noEmit`): passed. `npm.cmd run build`: passed; hint string verified in the production bundle. No backend changes (pytest green at 120 on identical backend).
+- Restarted `npm run dev` onto the new code; health OK.
+
+### 2026-09-15 Assign-Dialog Prefill From Traveler Picks
+
+Inspected:
+
+- Reported empty Assign Hotel dialog (rooms blank, dates blank, property unselected) forcing manual re-entry after Accept. `openDialog` prefilled only from existing assignments. Transport/activity dialogs already prefilled route/dates/trip/participants; only Hotels lacked traveler-derived defaults.
+
+Changed:
+
+- New pure `hotelAssignPrefill()` in `src/utils/opsViewModels.ts`: property matched from live inventory by name (exact, then contains-either-way; empty with honest hint when unmatched), rooms defaulting to the app's own ceil(travelers/2) convention, room type + check-in/out copied from the traveler pick, existing assignments returned untouched. Everything stays editable; backend revalidates on save.
+- `OperatorHotels` assign/change dialog uses the prefill plus a "Prefilled from traveler pick — review before saving" hint line. Accept is now one review + Save Assignment.
+- Verified via esbuild-bundled node checks (matched/unmatched/existing/no-pick cases all pass).
+
+Files modified:
+
+- `src/utils/opsViewModels.ts`
+- `src/components/operator/OperatorHotels.tsx`
+- `README.md`
+
+Tests/checks performed:
+
+- Node runtime prefill checks: passed. `npm.cmd run lint`: passed. `npm.cmd run build`: passed; hint string verified in the production bundle. No backend changes (pytest regression not re-run; suite green at 120 on identical backend).
+- Restarted `npm run dev` onto the new code; health OK.
+
+### 2026-09-15 Operator Approval Pipeline (Confirm → Approve → Assign → Finalize)
+
+Inspected:
+
+- Traveler confirm endpoints (Express + FastAPI), ops assignment services and mutation points, portal tab wiring and trip sourcing, dashboard/active-tours filters, console props. No approval/finalize state existed; assignments were attachable with no gating.
+
+Changed:
+
+- New `TripApproval` model + migration `0006_trip_approval`: per-trip pipeline row (approved/accepted/finalized + timestamps, trip_id unique). No competing Trip status system: Express/FastAPI trip lifecycles untouched.
+- `backend/ops/service.py`: `approve_trip` (idempotent), `accept_trip_assignment` (requires approval), `get_trip_pipeline` + `list_trip_approvals`, `finalize_trip` (requires approval + accept + complete hotel/transport + confirmed activity when required; idempotent re-finalize with zero duplicate rows; persists traveler notification + per-vendor partner outreach rows since no email/SMS gateway exists). Gating: resource-attach mutations (all three creates/replaces, activity confirm) require approval (409 otherwise); every assignment mutation rejects once finalized (409 lock).
+- 5 FastAPI routes + schemas (`TripApprovalRead`, `TripPipelineResponse`, `TripFinalizeRequest/Response`); matching Express proxies.
+- Express `POST /api/trips/:id/operator-note` (validated traveler-visible inbox row, follows lock-booking pattern) so finalize visibly reaches the traveler UI.
+- Frontend: `TourFlowApi` pipeline methods + types; new `OperatorAssignmentFlow` (progress bar, Review modal → Approve & Continue, Accept & Assign, three service cards navigating to the existing consoles, Final Review with backend-derived validation checklist + financials computed from fetched rows with transport/tax rows explicitly labeled untracked, Finalize modal → finalize + operator note with both responses shown); dashboard Incoming Confirmed Trips section (traveler-confirmed, unfinalized, with Review → center); new Assignment Center sidebar tab; consoles accept `focusTripId` (banner + trip filter + activity dialog prefill); active-tours + badge now mean ongoing or confirmed-finalized.
+- Financial summary: traveler price from trip, partner cost = hotel + confirmed activities from fetched rows, margin = difference; transport/taxes rows explicitly labeled as contract/included (no invented rates).
+
+Files modified:
+
+- `backend/models/models.py`
+- `backend/ops/service.py`
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `server.ts`
+- `src/types/tourflow.ts`
+- `src/services/api.ts`
+- `src/components/operator/OperatorAssignmentFlow.tsx` (created)
+- `src/components/operator/OperatorDashboard.tsx`
+- `src/components/operator/OperatorPortal.tsx`
+- `src/components/operator/OperatorSidebar.tsx`
+- `src/components/operator/OperatorHotels.tsx`
+- `src/components/operator/OperatorTransport.tsx`
+- `src/components/operator/OperatorVendors.tsx`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `database/migrations/versions/0006_trip_approval.py`
+- `src/components/operator/OperatorAssignmentFlow.tsx`
+
+APIs/routes added:
+
+- `POST /api/ops/trips/{trip_id}/approve`, `POST .../accept`, `GET .../pipeline`, `GET /api/ops/approvals`, `POST .../finalize`
+- `POST /api/trips/:id/operator-note` (Express)
+- Same ops paths proxied through Express.
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with temp sqlite DB: passed (120 passed: 117 + 3 new pipeline tests covering gating-409s, approve/accept idempotency, finalize missing-list 422, finalize success + locks + idempotent re-finalize with zero duplicate notifications, OpenAPI registration; existing ops tests extended with approval setup).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; bundle contains Assignment Center / Accept & Assign / Finalize / Incoming Confirmed Trips strings.
+- `git diff --check`: clean (see below).
+- Live 14-step drill (Express trip + scratch sqlite ops backend): create → confirm → pre-approval assign rejected 409 → approve → accept → hotel/transport/activity assigned via existing console endpoints → pipeline 3/3 → finalize (traveler notified, 1 partner queued) → mutation locked 409 → traveler inbox note 201 → trip confirmed with 3 notifications → drill trip deleted.
+
+Known remaining issues:
+
+- UI gating (assign buttons disabled pre-acceptance) is frontend-side; backend gating is authoritative for FastAPI ops rows. Cross-store trip existence is not enforced (opaque trip ids, documented).
+- No email/SMS gateway: partner "notification" is persisted outreach records with real contacts, surfaced honestly in the UI.
+- Prototype auth limitation for pipeline actions unchanged (operator console context only).
+
+### 2026-09-15 Traveler Selection vs Operator Assignment Mapping Fix
+
+Inspected:
+
+- Reported "Unassigned" property with a traveler pick underneath. Traced the data: consoles receive the full Express trip (traveler selections) plus backend assignment rows, but the Hotels cell prioritized the assignment (`assignment?.hotel?.name || 'Unassigned'`) and Transport/Activity views had no traveler-selection concept. No backend gap: traveler picks live in the trip record, assignments in the ops tables, both keyed by the same trip id. Fixed the view-model mapping, not the architecture; confirmation endpoint and all assignment APIs untouched.
+
+Changed:
+
+- New pure `src/utils/opsViewModels.ts` (`hotelRowView`, `transportRowView`, `travelerActivityRows`): traveler pick vs operational assignment derived from already-fetched data, never invented; absence renders as "No traveler selection" / Pending.
+- Hotels rows: PROPERTY shows the assigned property, else the traveler pick, else "No traveler selection"; separate "Traveler selection: ✓/—" and "Operator assignment: ✓ Assigned / Pending|Issue" lines; Attention cell retitled with next-action text.
+- Transport rows: vehicle cell shows traveler pick (`operator (mode)`) plus operational vehicle state with the same two-line separation; no fabricated vehicles/drivers.
+- Activities dispatch board: new "Traveler selections awaiting assignment" section rendering the trip's real itinerary activities (Trip ID, schedule Day N + times, participants = party size, cost, Pending, vendor "Pending assignment") with Create-assignment and Open actions. Detail modal adds the trip's traveler picks.
+- Verified with esbuild-bundled node runtime checks (all pass) since the project has no frontend test runner.
+
+Files modified:
+
+- `src/utils/opsViewModels.ts` (created)
+- `src/components/operator/OperatorHotels.tsx`
+- `src/components/operator/OperatorTransport.tsx`
+- `src/components/operator/OperatorVendors.tsx`
+- `README.md`
+
+Tests/checks performed:
+
+- Node runtime checks on the view models: traveler hotel/transport/activities surface correctly, no-selection and assigned states, same trip id throughout, input purity — all passed.
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with temp sqlite DB: passed (114 passed) — no backend changes, regression only.
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; fresh bundle contains the "Traveler selection" and "Operator assignment" contracts.
+- `git diff --check`: clean (see below).
+- Live drill (Express trip + scratch sqlite ops backend): create Manali trip → traveler hotel/transport/3 activities → confirm (confirmed) → zero auto-created ops rows (404s/empty) → operator assigns real inventory property (201 assigned) → trip pick intact + assignment persists on refresh → drill trip deleted.
+
+Known remaining issues:
+
+- Rendered-UI verification is static (bundle-string + structural review, same method as the confirm-panel fix); a live browser pass still needs `npm run dev` on current code.
+- Repeated full-trip live drills spend SerpApi credits via trip generation; drill trips deleted afterwards.
+
+### 2026-09-15 Local Postgres Repair (Operations Backend Unblocked)
+
+Inspected:
+
+- `Operations backend unreachable ... (500)` from the ops consoles. `GET /api/health` showed `db=error: password authentication failed`; direct `GET /api/ops/vehicles` returned 500. `.env` DSN `postgresql://postgres:Spk2006@localhost:5432/TourFlowAI` vs PostgreSQL 18 service (running, `scram-sha-256` everywhere, no trust entries).
+
+Changed:
+
+- Verified service control availability (accidentally paused the service during the check; resumed immediately, state Running — no data impact).
+- Added a temporary first-match `trust` line for local postgres maintenance (file backed up first), reset the `postgres` role password to the `.env` value via `ALTER USER`, created the missing case-sensitive `TourFlowAI` database (the pre-existing `tourflowai` is a different, empty database; Postgres matches DB names case-sensitively), then removed the trust line and verified `pg_hba.conf` is byte-identical to the backup. Password authentication is enforced again (wrong-password probe rejected).
+- Ran `alembic upgrade head` (0001 → 0005) and the deterministic seed on the real database; restarted FastAPI.
+
+Files modified:
+
+- `README.md` only (no application code changed; `pg_hba.conf` restored byte-identical).
+
+Tests/checks performed:
+
+- `GET /api/health`: `database: connected`.
+- Through the UI's exact path (`:3000` Express proxies): `GET /api/ops/vehicles` → 3 seeded vehicles, `GET /api/ops/drivers` → 3 drivers, `GET /api/ops/properties` → 5 properties. The ops consoles' error banner clears with the backend reachable.
+
+Known remaining issues:
+
+- The earlier changelog entries that cite the Postgres password blocker are now resolved by this entry.
+
+### 2026-09-15 Confirm Panel Placement Fix (AI Console Itinerary Tab)
+
+Inspected:
+
+- Reported missing Review & Confirm panel on the traveler itinerary page showing Day 6 Schedule + Destination Tray. Traced rendering: that page is `AIChatConsole`'s generated-trip workspace (`workspaceState === 'generated'`, itinerary tab with its own day list + `PossibleOptionsTray`), not `TripDetailView` (which renders only inside the `workspace` tab via `TravelerWorkspace`). The panel existed solely in `TripDetailView`, so the normal post-generate flow could never show it.
+
+Changed:
+
+- Extracted a shared `TripConfirmPanel` (`src/components/TripConfirmPanel.tsx`): identical review summary/counts, Confirm Trip button, confirmation modal, success state (Trip ID + timestamp + status), backend error display, and double-click protection — all driven by the passed trip and the existing `POST /api/trips/:id/confirm` flow. No second system, no new endpoint.
+- `TripDetailView` now renders the shared panel (same position, bottom of detail page).
+- `AIChatConsole` itinerary tab renders the shared panel after the day-by-day list and the options tray, inside the same `space-y-6` tab container and scroll flow; `onConfirmed` swaps in the backend-returned trip. Verified placement is not behind the tray/overlays (tray is a preceding sibling; modal is `fixed z-50` like all file modals), not clipped by overflow (only card-level `overflow-hidden` on siblings), and not status-gated away (renders for planning/confirmed/other statuses). Responsive via the shared `flex-col sm:flex-row` layout.
+
+Files modified:
+
+- `src/components/TripConfirmPanel.tsx` (created)
+- `src/components/TripDetailView.tsx`
+- `src/components/AIChatConsole.tsx`
+- `README.md`
+
+Tests/checks performed:
+
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed (2371 modules); production bundle `dist/assets/index-j8OddpOS.js` verified to contain the Review & Confirm UI strings and `panel-review-confirm` marker.
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with temp sqlite DB: passed (114 passed) — no backend changes, regression only.
+- `git diff --check`: clean (see below).
+- Render verification is static (no browser harness in repo): guard chain `workspaceState === 'generated' && generatedTrip` confirmed at the workspace root, panel mounted in both traveler flows, modal/overlay classes match existing working modals.
+
+Known remaining issues:
+
+- Visual confirmation in a real browser session still requires `npm run dev` + generating/opening a trip (stale dev servers serve old bundles).
+
+### 2026-09-15 Traveler Trip Confirmation → Operator Portal Workflow
+
+Inspected:
+
+- Traveler creation/detail flow (Express `tripsStore`, `TripDetailView` tabs, `lock-booking`/`select-hotel` persist patterns), FastAPI trip/status/notify models and routes, all ops consoles and their assignment keying, portal tab wiring (all tabs read the same Express trip store; `active_tours` already lists confirmed tours; operator accept-request already sets confirmed), migration chain (head `0004`), `TourFlowApi`.
+
+Changed:
+
+- Traveler confirmation is a validated, persisted backend status transition — not frontend state. Express `POST /api/trips/:id/confirm` (canonical for traveler trips): 404 unknown, 403 on user mismatch, idempotent reconfirm, 422 unless planning with destination/dates/travelers/itinerary all valid; persists status + `confirmed_at`/`confirmed_by`, change-history row, traveler notification row; returns `{success, already_confirmed, confirmed_at, trip}`. No ops rows fabricated; operators attach inventory afterwards.
+- FastAPI `POST /api/trips/{trip_id}/confirm` (canonical for DB trips, same semantics + `TripConfirmRequest/Response` schemas), new `OpsForbidden` → 403 mapping, migration `0005_trip_confirmation` (`confirmed_at`, `confirmed_by`), `_trip_dict` + `TripBase` expose the fields.
+- `TripDetailView`: bottom Review & Confirm panel (planning → summary + Confirm Trip button; confirmed → success state with Trip ID + timestamp) and a modal summarizing real trip data (ID, destination, dates, travelers, hotels, activity count, transport, total) with Go Back/Confirm, backend errors shown, double-click safe.
+- `TourFlowApi.confirmTrip()`; `Trip.confirmed_at/confirmed_by` types.
+- Ops consoles show traveler selections from the same trip record (Hotels: traveler pick line; Transport: traveler operator/mode line; Activities detail modal: traveler activity picks) — zero duplication, zero ID matching.
+- Operator audit: dashboard/trip-requests/active-tours/itineraries/bookings/alerts/assistant/analytics all consume the same trip store; confirmed trips surface in active_tours and all consoles keyed by the same Trip ID. No tab changes needed.
+
+Files modified:
+
+- `server.ts`
+- `src/components/TripDetailView.tsx`
+- `src/services/api.ts`
+- `src/types/tourflow.ts`
+- `src/components/operator/OperatorHotels.tsx`
+- `src/components/operator/OperatorTransport.tsx`
+- `src/components/operator/OperatorVendors.tsx`
+- `src/components/operator/OperatorPortal.tsx` (removed now-unused vendor fetch/toggle after console rebuild)
+- `backend/models/models.py`
+- `backend/ops/service.py`
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `database/migrations/versions/0005_trip_confirmation.py`
+
+APIs/routes added:
+
+- `POST /api/trips/:id/confirm` (Express, traveler trips)
+- `POST /api/trips/{trip_id}/confirm` (FastAPI, DB trips)
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with temp sqlite DB: passed (114 passed), including 3 new confirm tests (happy path + persistence + single history/notification + idempotent reconfirm + no fabricated assignments + operator status-filter visibility; 404/403/cancelled/dates validation; OpenAPI registration).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean (see below).
+- Live E2E drill on restarted servers (Express trip): create Goa trip → select hotel → confirm (success, timestamp, status confirmed) → reconfirm idempotent (single history row) → refresh persists → portal trip list contains ID → wrong-user rejected → unknown ID 404 → ops consoles return backend errors honestly (local Postgres still unreachable) → drill trip deleted.
+
+Known remaining issues:
+
+- Same known local-Postgres password issue gates local FastAPI persistence (including FastAPI-side confirm); Express-side flow is fully green.
+- Traveler UI has no test runner (only `tsc`), same as previous modules; Express routes verified by live drill, FastAPI contract by pytest.
+- Prototype auth limitation: ownership is enforced against caller-supplied `user_id` matching the trip owner (documented in code); no session auth exists to strengthen it.
+
+### 2026-09-15 Activities & Vendors Operations Console (Dispatch Module)
+
+Inspected:
+
+- SQLAlchemy `Activity`/`Vendor`/`Trip` models, FastAPI routes, Express trips store, `TourFlowApi`, portal tab wiring (sidebar `vendors` tab already labeled "Activities & Vendors"), existing `OperatorVendors.tsx` (static directory), and the Hotels/Transport ops architecture (`backend/ops/service.py`, `/api/ops/*`, Express proxies, 30 s polling consoles). No `Vehicle`/`Driver` equivalent existed; `Activity`/`Vendor` were reused (no duplicates).
+
+Changed:
+
+- New `ActivityAssignment` model (many rows per trip: activity FK, vendor FK, scheduled date, start/end times normalized to HH:MM, participants, pending/confirmed/issue status) plus nullable `Activity.capacity` (NULL = unknown, allocation recorded without a cap). Alembic revision `0004_activity_assignments`; seed capacities added to the five Manali activities (12/30/20/25/16).
+- Extended `backend/ops/service.py`: eligibility (verified + type activity/guide), capacity enforcement (→ 409), trip-overlap and vendor-overlap detection (→ 409), FastAPI trip-window date check (skipped for non-DB trips, documented), explicit confirm (→ confirmed, 422 when incomplete), flag/resolve, backend-computed price (unit × participants), vendor onboarding + verify toggle, eligible-vendors and vendor↔trips/assignments relationship queries.
+- 12 FastAPI routes (`/api/ops/activities*`, `/api/ops/activity-inventory*`, `/api/ops/vendors*`) + schemas; matching Express proxies; `TourFlowApi` activity ops methods + types.
+- Rebuilt `OperatorVendors.tsx` into the Activities & Vendors console (Dispatch board with search/status/date filters + sort, assign/edit dialog with inventory + eligible-vendor selects, allocation/confirm/flag/resolve actions, full-chain detail modal, Vendors tab with live trip counts + expandable assignments + onboarding + verify toggle). Same slate design system, 30 s polling, loading/empty/error/toast/confirm states. Portal now passes `trips`; removed the dead Express-vendor fetch/toggle from the portal.
+- Guest counts prefill from the real trip traveler_count; manifests/prices derive from fetched data only.
+
+Files modified:
+
+- `backend/models/models.py`
+- `backend/ops/service.py`
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `database/seed_data/seed.py`
+- `server.ts`
+- `src/types/tourflow.ts`
+- `src/services/api.ts`
+- `src/components/operator/OperatorVendors.tsx`
+- `src/components/operator/OperatorPortal.tsx`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `database/migrations/versions/0004_activity_assignments.py`
+
+APIs/routes added:
+
+- `GET/POST /api/ops/activities`, `GET/PUT /api/ops/activities/{id}`, `PUT .../allocation`, `POST .../confirm`, `POST .../flag-issue`, `POST .../resolve-issue`
+- `GET /api/ops/activity-inventory`, `GET /api/ops/activity-inventory/{id}/vendors`
+- `GET/POST /api/ops/vendors`, `POST /api/ops/vendors/{id}/verify`, `GET /api/ops/vendors/{id}/assignments`
+- Same paths proxied through Express.
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with temp sqlite DB: passed (111 passed), including 8 new activity tests (lifecycle + backend-computed price + persistence, capacity 409s, trip/vendor overlap 409s + adjacent-OK + trip-window 422, confirm/flag/resolve + filtered lists, both-direction vendor relationships, onboarding + verify-gated eligibility, OpenAPI registration, banned-hardcode scan of the console).
+- `npm.cmd run lint` (`tsc --noEmit`): passed.
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean. Hardcode-pattern scan of the console: no hits.
+- Live 12-step drill against scratch sqlite FastAPI: inventory → eligible vendor → assign (201, price ₹14,000) → trip overlap 409 → over-capacity 409 → confirm → re-read persists → onboard second vendor → change vendor persists → flag → resolve → vendor view shows trip → trip view consistent.
+
+Known remaining issues:
+
+- Same known local-Postgres password issue gates local FastAPI ops persistence; drill proves the stack on a reachable DB. Frontend has no test runner (only `tsc`), same as the Hotels/Transport modules.
+- Integrated-mode trips live in the Express in-memory store, so activity assignments key trips by opaque trip_id strings; trip-window validation applies only to trips present in the backend DB.
+
+### 2026-09-15 Hotels & Transport Operations Consoles (Dispatch Modules)
+
+Inspected:
+
+- SQLAlchemy models (`Trip`, `Hotel`, `TransportOption`, `Vendor`, `Booking`, `Notification`), FastAPI routes, Express trips store (`/api/trips` in-memory), `TourFlowApi`, operator portal wiring (`trips` + `onSelectTrip` props), existing `OperatorHotels.tsx`/`OperatorTransport.tsx` (fabricated reg numbers, chauffeurs/phones, room counts, index-based trip links, fake telemetry), seed and Alembic conventions (head `0002_dynamic_evidence`).
+
+Changed:
+
+- New models (no duplicates; `Vehicle`/`Driver` had no equivalent, assignments had none): `Vehicle`, `Driver`, `AccommodationAssignment` (one row per trip: hotel, rooms, room type, check-in/out, derived status), `TransportAssignment` (one row per trip: vehicle, driver, route, pickup/drop, lifecycle status + delay fields). Alembic revision `0003_ops_assignments`; seed adds 3 vehicles + 3 drivers (dev/test infra only, same pattern as existing seeds).
+- New `backend/ops/service.py`: backend status rules (no hotel → pending; hotel + rooms ≥ 1 → assigned; else issue; transport pending → assigned → en_route → completed with assigned/en_route → delayed + resolve-back), overlap conflict validation per vehicle/driver on active journeys (→ 409), existence validation (→ 404), input validation (→ 422), traveler notifications persisted as real `Notification` rows composed from live assignment facts (never a fake "sent" toast).
+- 20 FastAPI routes under `/api/ops/*` (assignments CRUD + rooms + flag/resolve, properties + property-trips, vehicles/drivers list + onboard, transport CRUD + timing + status + notify) plus matching Pydantic schemas; OpenAPI-registered.
+- Express: 20 thin same-origin proxies to FastAPI (existing bridge pattern), since canonical ops state lives in the database.
+- Frontend: `TourFlowApi` ops methods + types; rebuilt `OperatorHotels.tsx` (Trip Assignments with search/status filter/sort, assign/change/rooms dialogs, guest manifest composed from the fetched trip's real party/bookings/dates, flag/resolve; Properties tab with live trip counts + expandable trip lists) and `OperatorTransport.tsx` (status stat cards, delayed-journey banner, dispatch board with assign/reassign/timing/lifecycle/delay/notify dialogs, Vehicles + Drivers tabs with onboarding forms). Same slate design system; 30 s polling + manual refresh; loading/empty/error/toast/confirm states throughout.
+- Guest manifests show real party size, companions, dietary, requests, dates, and booking references — no invented guest names (none exist in the data model).
+
+Files modified:
+
+- `backend/models/models.py`
+- `backend/api/routes.py`
+- `backend/schemas/schemas.py`
+- `database/seed_data/seed.py`
+- `server.ts`
+- `src/types/tourflow.ts`
+- `src/services/api.ts`
+- `src/components/operator/OperatorHotels.tsx`
+- `src/components/operator/OperatorTransport.tsx`
+- `tests/test_backend.py`
+- `README.md`
+
+Files created:
+
+- `backend/ops/__init__.py`
+- `backend/ops/service.py`
+- `database/migrations/versions/0003_ops_assignments.py`
+
+APIs/routes added:
+
+- `GET/POST /api/ops/accommodations`, `GET/PUT /api/ops/accommodations/{trip_id}`, `PUT .../rooms`, `POST .../flag-issue`, `POST .../resolve-issue`
+- `GET /api/ops/properties`, `GET /api/ops/properties/{hotel_id}/trips`
+- `GET/POST /api/ops/vehicles`, `GET/POST /api/ops/drivers`
+- `GET/POST /api/ops/transport`, `GET/PUT /api/ops/transport/{trip_id}`, `PUT .../timing`, `POST .../status`, `POST .../notify`
+- Same 20 paths proxied through Express.
+
+Tests/checks performed:
+
+- `.\\venv\\Scripts\\python.exe -m pytest -q` with temp sqlite DB: passed (103 passed), including 8 new ops tests (properties from DB, accommodation lifecycle + status rules + 409/404/422, two-way property↔trip links, fleet onboarding + duplicate reg + validation, transport lifecycle + vehicle/driver 409 conflicts + window ordering, delay reason required + resolve, persisted notifications, OpenAPI registration, banned-hardcode scan of both consoles).
+- `npm.cmd run lint` (`tsc --noEmit`): passed (fixed one duplicate `changeAccommodation` identifier).
+- `npm.cmd run build`: passed; Vite emitted its existing large-chunk warning.
+- `git diff --check`: clean. Hardcode-pattern scan of new/rewritten files: no hits.
+- Live verification: restarted FastAPI + Express; Express→FastAPI ops proxy path confirmed (500 from FastAPI only due to the known wrong local postgres password — see below). Full flow drilled against a scratch sqlite FastAPI on :8001: assign hotel → assigned, property↔trip both directions, transport assign → assigned, overlapping vehicle → 409, en_route → delayed (with reason) → persisted notification → resolve → completed.
+
+Known remaining issues:
+
+- Local ops persistence needs a reachable database: `.env` points at local Postgres whose password is rejected, so FastAPI ops endpoints 500 locally until the password is corrected (or the DSN is switched to `sqlite:///./tourflow.db`). The scratch-sqlite drill above proves the stack is green once the DB is reachable.
+- Integrated-mode trips live in the Express in-memory store, so ops assignments key trips by opaque trip_id strings without a cross-store FK; the consoles join them at render time.
+- Traveler notifications persist as backend `Notification` rows (real inbox records); there is no email/SMS gateway, so delivery is inbox-based.
+- No pre-existing auth layer was found (operator login is a demo credential check), so ops routes follow the same convention; no new auth was introduced.
+
 ### 2026-09-13 Transport Photo Rollout Fix (Stale Server + Failure Cache)
 
 Inspected:

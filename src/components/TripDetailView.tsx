@@ -10,6 +10,7 @@ import { Trip } from '../types/tourflow';
 import { TourFlowApi } from '../services/api';
 import { useTripStore } from '../store/useTripStore';
 import { TripInteractiveMap } from './TripInteractiveMap';
+import { TripConfirmPanel } from './TripConfirmPanel';
 
 interface TripDetailViewProps {
   trip: Trip;
@@ -822,6 +823,9 @@ export default function TripDetailView({ trip, onRefreshTrip, onOpenEditPreferen
           )}
         </div>
       )}
+
+      {/* Final Review & Confirm Trip (shared confirmation flow) */}
+      <TripConfirmPanel trip={trip} onConfirmed={() => onRefreshTrip()} />
 
       {/* Delete Itinerary Confirmation Modal */}
       {showDeleteTripModal && (

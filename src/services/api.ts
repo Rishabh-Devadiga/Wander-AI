@@ -10,6 +10,23 @@ import {
   OperatorVendor,
   PossibleOptionItem,
   HotelSearchResponse,
+  AccommodationAssignment,
+  AccommodationStatus,
+  OpsProperty,
+  Vehicle,
+  Driver,
+  TransportAssignment,
+  TransportStatus,
+  TravelerNotification,
+  ActivityAssignment,
+  ActivityAssignmentStatus,
+  OpsActivityInventoryItem,
+  OpsVendorDetail,
+  OpsVendorMini,
+  OpsVendorRow,
+  TripApprovalState,
+  TripPipeline,
+  TripFinalizeResult,
 } from '../types/tourflow';
 
 const API_BASE = '/api';
@@ -149,6 +166,21 @@ export const TourFlowApi = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Trip not found' }));
       throw new Error(err.detail || `Trip not found with id: ${tripId}`);
+    }
+    return await res.json();
+  },
+
+  async confirmTrip(tripId: string, userId?: string): Promise<{
+    success: boolean; already_confirmed: boolean; confirmed_at?: string | null; trip: Trip;
+  }> {
+    const res = await fetch(`${API_BASE}/trips/${tripId}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(userId ? { user_id: userId } : {}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to confirm trip' }));
+      throw new Error(err.detail || 'Failed to confirm trip');
     }
     return await res.json();
   },
@@ -509,8 +541,7 @@ export const TourFlowApi = {
     return await this.deleteItineraryActivity(tripId, itemId);
   },
 
-  async deleteTrip(tripId: string): Promise<{ success: boolean; message?: string }> {
-    const res = await fetch(`${API_BASE}/trips/${tripId}`, {
+    async deleteTrip(tripId: string): Promise<{ success: boolean; message?: string }> {    const res = await fetch(`${API_BASE}/trips/${tripId}`, {
       method: 'DELETE',
     });
     if (!res.ok) {
@@ -682,6 +713,189 @@ export const TourFlowApi = {
       throw new Error(err.detail || 'Place image lookup failed');
     }
     return await res.json();
+  },
+
+  // ---- Operations consoles (canonical state in FastAPI + database) ----
+  async _ops<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: `Operations request failed (${res.status})` }));
+      throw new Error(err.detail || `Operations request failed (${res.status})`);
+    }
+    return (await res.json()) as T;
+  },
+
+  // Accommodation operations
+  getAccommodationAssignments(status?: AccommodationStatus): Promise<AccommodationAssignment[]> {
+    const q = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this._ops('GET', `/ops/accommodations${q}`);
+  },
+  getAccommodationAssignment(tripId: string): Promise<AccommodationAssignment> {
+    return this._ops('GET', `/ops/accommodations/${encodeURIComponent(tripId)}`);
+  },
+  assignAccommodation(payload: {
+    trip_id: string; hotel_id?: string | null; rooms?: number | null;
+    room_type?: string | null; check_in_date?: string | null; check_out_date?: string | null;
+  }): Promise<AccommodationAssignment> {
+    return this._ops('POST', '/ops/accommodations', payload);
+  },
+  changeAccommodationAssignment(tripId: string, payload: {
+    hotel_id?: string | null; rooms?: number | null;
+    room_type?: string | null; check_in_date?: string | null; check_out_date?: string | null;
+  }): Promise<AccommodationAssignment> {
+    return this._ops('PUT', `/ops/accommodations/${encodeURIComponent(tripId)}`, payload);
+  },
+  updateRoomAllocation(tripId: string, payload: {
+    rooms?: number | null; room_type?: string | null;
+  }): Promise<AccommodationAssignment> {
+    return this._ops('PUT', `/ops/accommodations/${encodeURIComponent(tripId)}/rooms`, payload);
+  },
+  flagAccommodationIssue(tripId: string, reason: string): Promise<AccommodationAssignment> {
+    return this._ops('POST', `/ops/accommodations/${encodeURIComponent(tripId)}/flag-issue`, { reason });
+  },
+  resolveAccommodationIssue(tripId: string): Promise<AccommodationAssignment> {
+    return this._ops('POST', `/ops/accommodations/${encodeURIComponent(tripId)}/resolve-issue`, {});
+  },
+  getProperties(): Promise<OpsProperty[]> {
+    return this._ops('GET', '/ops/properties');
+  },
+  getPropertyTrips(hotelId: string): Promise<{ hotel: { id: string; name: string; address?: string | null }; assignments: AccommodationAssignment[] }> {
+    return this._ops('GET', `/ops/properties/${encodeURIComponent(hotelId)}/trips`);
+  },
+
+  // Fleet inventory
+  getVehicles(): Promise<Vehicle[]> {
+    return this._ops('GET', '/ops/vehicles');
+  },
+  createVehicle(payload: { name: string; registration_number: string; vehicle_type?: string; capacity?: number }): Promise<Vehicle> {
+    return this._ops('POST', '/ops/vehicles', payload);
+  },
+  getDrivers(): Promise<Driver[]> {
+    return this._ops('GET', '/ops/drivers');
+  },
+  createDriver(payload: { name: string; phone?: string; license_number?: string }): Promise<Driver> {
+    return this._ops('POST', '/ops/drivers', payload);
+  },
+
+  // Transport operations
+  getTransportAssignments(status?: TransportStatus): Promise<TransportAssignment[]> {
+    const q = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this._ops('GET', `/ops/transport${q}`);
+  },
+  getTransportAssignment(tripId: string): Promise<TransportAssignment> {
+    return this._ops('GET', `/ops/transport/${encodeURIComponent(tripId)}`);
+  },
+  assignTransport(payload: {
+    trip_id: string; vehicle_id?: string | null; driver_id?: string | null;
+    origin?: string | null; destination?: string | null;
+    pickup_at?: string | null; dropoff_at?: string | null;
+  }): Promise<TransportAssignment> {
+    return this._ops('POST', '/ops/transport', payload);
+  },
+  changeTransportAssignment(tripId: string, payload: {
+    vehicle_id?: string | null; driver_id?: string | null;
+    origin?: string | null; destination?: string | null;
+    pickup_at?: string | null; dropoff_at?: string | null;
+  }): Promise<TransportAssignment> {
+    return this._ops('PUT', `/ops/transport/${encodeURIComponent(tripId)}`, payload);
+  },
+  updateJourneyTiming(tripId: string, payload: {
+    pickup_at?: string | null; dropoff_at?: string | null;
+    origin?: string | null; destination?: string | null;
+  }): Promise<TransportAssignment> {
+    return this._ops('PUT', `/ops/transport/${encodeURIComponent(tripId)}/timing`, payload);
+  },
+  setTransportStatus(tripId: string, to_status: TransportStatus, delay_reason?: string): Promise<TransportAssignment> {
+    return this._ops('POST', `/ops/transport/${encodeURIComponent(tripId)}/status`, { to_status, delay_reason });
+  },
+  notifyTraveler(tripId: string, event: string, note?: string): Promise<TravelerNotification> {
+    return this._ops('POST', `/ops/transport/${encodeURIComponent(tripId)}/notify`, { event, note });
+  },
+
+  // Activity dispatch operations
+  getActivityAssignments(filters?: {
+    trip_id?: string; status?: ActivityAssignmentStatus; vendor_id?: string; scheduled_date?: string;
+  }): Promise<ActivityAssignment[]> {
+    const q = new URLSearchParams();
+    if (filters?.trip_id) q.set('trip_id', filters.trip_id);
+    if (filters?.status) q.set('status', filters.status);
+    if (filters?.vendor_id) q.set('vendor_id', filters.vendor_id);
+    if (filters?.scheduled_date) q.set('scheduled_date', filters.scheduled_date);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return this._ops('GET', `/ops/activities${suffix}`);
+  },
+  getActivityAssignment(assignmentId: string): Promise<ActivityAssignment> {
+    return this._ops('GET', `/ops/activities/${encodeURIComponent(assignmentId)}`);
+  },
+  assignActivity(payload: {
+    trip_id: string; activity_id: string; vendor_id?: string | null;
+    scheduled_date?: string | null; start_time?: string | null; end_time?: string | null;
+    participants?: number | null;
+  }): Promise<ActivityAssignment> {
+    return this._ops('POST', '/ops/activities', payload);
+  },
+  changeActivityAssignment(assignmentId: string, payload: {
+    activity_id?: string | null; vendor_id?: string | null; vendor_cleared?: boolean;
+    scheduled_date?: string | null; start_time?: string | null; end_time?: string | null;
+    participants?: number | null;
+  }): Promise<ActivityAssignment> {
+    return this._ops('PUT', `/ops/activities/${encodeURIComponent(assignmentId)}`, payload);
+  },
+  updateActivityAllocation(assignmentId: string, participants?: number | null): Promise<ActivityAssignment> {
+    return this._ops('PUT', `/ops/activities/${encodeURIComponent(assignmentId)}/allocation`, { participants });
+  },
+  confirmActivityAssignment(assignmentId: string): Promise<ActivityAssignment> {
+    return this._ops('POST', `/ops/activities/${encodeURIComponent(assignmentId)}/confirm`, {});
+  },
+  flagActivityIssue(assignmentId: string, reason: string): Promise<ActivityAssignment> {
+    return this._ops('POST', `/ops/activities/${encodeURIComponent(assignmentId)}/flag-issue`, { reason });
+  },
+  resolveActivityIssue(assignmentId: string): Promise<ActivityAssignment> {
+    return this._ops('POST', `/ops/activities/${encodeURIComponent(assignmentId)}/resolve-issue`, {});
+  },
+  getEligibleVendors(activityId: string): Promise<{ activity: { id: string; title: string; capacity?: number | null }; vendors: OpsVendorMini[] }> {
+    return this._ops('GET', `/ops/activity-inventory/${encodeURIComponent(activityId)}/vendors`);
+  },
+  onboardVendor(payload: { name: string; vendor_type?: string; contact_email?: string; phone?: string }): Promise<OpsVendorMini> {
+    return this._ops('POST', '/ops/vendors', payload);
+  },
+  getVendorAssignments(vendorId: string): Promise<OpsVendorDetail> {
+    return this._ops('GET', `/ops/vendors/${encodeURIComponent(vendorId)}/assignments`);
+  },
+
+  // Operator approval pipeline (traveler-confirmed -> approved -> accepted -> finalized)
+  getTripApprovals(): Promise<TripApprovalState[]> {
+    return this._ops('GET', '/ops/approvals');
+  },
+  getTripPipeline(tripId: string): Promise<TripPipeline> {
+    return this._ops('GET', `/ops/trips/${encodeURIComponent(tripId)}/pipeline`);
+  },
+  approveTrip(tripId: string): Promise<TripApprovalState> {
+    return this._ops('POST', `/ops/trips/${encodeURIComponent(tripId)}/approve`, {});
+  },
+  acceptTripAssignment(tripId: string): Promise<TripApprovalState> {
+    return this._ops('POST', `/ops/trips/${encodeURIComponent(tripId)}/accept`, {});
+  },
+  finalizeTrip(tripId: string, requireActivities = true): Promise<TripFinalizeResult> {
+    return this._ops('POST', `/ops/trips/${encodeURIComponent(tripId)}/finalize`, { require_activities: requireActivities });
+  },
+  postOperatorNote(tripId: string, payload: { title: string; message: string; type?: string }): Promise<any> {
+    return this._ops('POST', `/trips/${encodeURIComponent(tripId)}/operator-note`, payload);
+  },
+  getOpsVendors(vendorType?: string): Promise<OpsVendorRow[]> {
+    const q = vendorType ? `?vendor_type=${encodeURIComponent(vendorType)}` : '';
+    return this._ops('GET', `/ops/vendors${q}`);
+  },
+  setVendorVerified(vendorId: string, is_verified: boolean): Promise<OpsVendorRow> {
+    return this._ops('POST', `/ops/vendors/${encodeURIComponent(vendorId)}/verify`, { is_verified });
+  },
+  getActivityInventory(destinationId?: string): Promise<OpsActivityInventoryItem[]> {
+    const q = destinationId ? `?destination_id=${encodeURIComponent(destinationId)}` : '';
+    return this._ops('GET', `/ops/activity-inventory${q}`);
   },
 
   // Live restaurant search (SerpApi Google Maps via backend; key never reaches browser).
