@@ -658,3 +658,38 @@ export interface AIChatResponse {
     is_dates_valid?: boolean;
   };
 }
+
+export type TripMessageCategory =
+  | 'general'
+  | 'operational'
+  | 'hotel'
+  | 'transport'
+  | 'activity'
+  | 'urgent';
+
+export const TRIP_MESSAGE_CATEGORIES: TripMessageCategory[] = [
+  'general',
+  'operational',
+  'hotel',
+  'transport',
+  'activity',
+  'urgent',
+];
+
+export interface TripMessage {
+  id: string;
+  trip_id: string;
+  operator_name: string;
+  category: TripMessageCategory;
+  body: string;
+  is_urgent: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TripMessageOverviewEntry {
+  trip_id: string;
+  message_count: number;
+  urgent_count: number;
+  latest_at?: string | null;
+}

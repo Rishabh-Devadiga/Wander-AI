@@ -12,6 +12,7 @@ import { OperatorVendors } from './OperatorVendors';
 import { OperatorAssignmentFlow } from './OperatorAssignmentFlow';
 import { OperatorBookings } from './OperatorBookings';
 import { OperatorAlerts } from './OperatorAlerts';
+import { OperatorCommunications } from './OperatorCommunications';
 import { OperatorAiAssistant } from './OperatorAiAssistant';
 import { OperatorAnalytics } from './OperatorAnalytics';
 import { TourFlowApi } from '../../services/api';
@@ -283,6 +284,7 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                 fetchAllData();
               }}
               onTriggerDisruptionDemo={handleTriggerDisruptionDemo}
+              operatorName={operatorUser.name || 'operator'}
             />
           ) : (
             <>
@@ -451,6 +453,14 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                 <OperatorAlerts
                   alerts={alerts}
                   onResolveAlert={handleResolveAlert}
+                  onSelectTrip={(id) => setSelectedTripId(id)}
+                />
+              )}
+
+              {currentTab === 'communications' && (
+                <OperatorCommunications
+                  trips={allTrips}
+                  operatorName={operatorUser.name || 'operator'}
                   onSelectTrip={(id) => setSelectedTripId(id)}
                 />
               )}

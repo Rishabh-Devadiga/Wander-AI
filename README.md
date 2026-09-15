@@ -737,6 +737,31 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-15 Operator Trip Communications (Internal, Trip-Centric)
+
+Inspected:
+
+- Operator portal structure (`OperatorPortal` tab switch, `OperatorSidebar` nav, `OperatorTripWorkspace` tab bar), FastAPI ops pattern (opaque `trip_id String(255)` with no FK in `AccommodationAssignment`/`TransportAssignment`/`TripApproval`, service-layer validation in `backend/ops/service.py`, routes in `backend/api/routes.py`, Express `OPS_PROXY_ROUTES` forwarding), migration chain (`0006_trip_approval` head), and pytest conventions (opaque trip IDs, `alembic upgrade head` + seed fixture). Trips carry no traveler name (only `user_id`; no users lookup exists), so the trip list shows party size/type instead of invented names.
+
+Changed:
+
+- Backend: new `trip_messages` table + `TripMessage` model (id, opaque trip_id indexed, operator_name, category, body, is_urgent, timestamps; no FK, mirroring ops tables); migration `0007_trip_communications`; schemas `TripMessageCreate` (Literal category, body ≤2000), `TripMessageRead`, `TripMessageOverviewEntry`; service functions `list_trip_messages` (chronological, optional category filter), `create_trip_message` (urgent category forces `is_urgent`), `trip_messages_overview` (per-trip counts via GROUP BY); routes `GET /ops/messages/overview`, `GET /ops/trips/{trip_id}/messages?category=`, `POST /ops/trips/{trip_id}/messages` (201; 422 on blank body/bad category/path-body trip mismatch). Express proxies the three routes. Traveler-facing APIs untouched — messages are operator-only.
+- Frontend: `TripMessageCategory`/`TripMessage`/`TripMessageOverviewEntry` types + `TRIP_MESSAGE_CATEGORIES`; `TourFlowApi` methods via `_ops`; new `TripCommunicationsPanel` (timeline with operator/timestamp/category, urgent rose state, category filters, composer with category select + urgent checkbox + Send, loading/empty/error/retry/send-success states); new `OperatorCommunications` page (searchable trip list with traveler party, destination, dates, status, message/urgent counts, recent-activity sort; main timeline; Open Trip Workspace button); sidebar `Communications` entry; `Communications` tab in Trip Details workspace reusing the same panel (operator name threaded from portal user, no hardcoded names).
+
+Files modified:
+
+- `backend/models/models.py`, `database/migrations/versions/0007_trip_communications.py` (created), `backend/schemas/schemas.py`, `backend/ops/service.py`, `backend/api/routes.py`, `server.ts`, `src/types/tourflow.ts`, `src/services/api.ts`, `src/components/operator/TripCommunicationsPanel.tsx` (created), `src/components/operator/OperatorCommunications.tsx` (created), `src/components/operator/OperatorSidebar.tsx`, `src/components/operator/OperatorPortal.tsx`, `src/components/operator/OperatorTripWorkspace.tsx`, `tests/test_backend.py`, `README.md`
+
+Tests/checks performed:
+
+- New `test_ops_trip_messages_create_list_filter_and_overview`: passed (create incl. urgent-forcing, chronological order, category filter + 422s, overview counts, openapi registration, validation cases).
+- Full suite in 3 chunks on a fresh sqlite DB (28 + 26 + 64 = 118): all passed. Note: re-running against a reused DB file fails idempotency-sensitive ops tests (fixed trip IDs) — always verify on a fresh file.
+- `npm run lint` (`tsc --noEmit`): passed. `npm run build`: passed. `git diff --check`: clean.
+
+Known remaining issues:
+
+- None from this change; no seed/demo messages exist (production starts with empty timelines).
+
 ### 2026-09-15 Traveler Schedule Carry-Over for Activity Assignment
 
 Inspected:

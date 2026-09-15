@@ -27,6 +27,9 @@ import {
   TripApprovalState,
   TripPipeline,
   TripFinalizeResult,
+  TripMessage,
+  TripMessageCategory,
+  TripMessageOverviewEntry,
 } from '../types/tourflow';
 
 const API_BASE = '/api';
@@ -896,6 +899,23 @@ export const TourFlowApi = {
   getActivityInventory(destinationId?: string): Promise<OpsActivityInventoryItem[]> {
     const q = destinationId ? `?destination_id=${encodeURIComponent(destinationId)}` : '';
     return this._ops('GET', `/ops/activity-inventory${q}`);
+  },
+
+  // Internal trip communications (operator-only; never traveler-facing)
+  getTripMessagesOverview(): Promise<TripMessageOverviewEntry[]> {
+    return this._ops('GET', '/ops/messages/overview');
+  },
+  getTripMessages(tripId: string, category?: TripMessageCategory): Promise<TripMessage[]> {
+    const q = category ? `?category=${encodeURIComponent(category)}` : '';
+    return this._ops('GET', `/ops/trips/${encodeURIComponent(tripId)}/messages${q}`);
+  },
+  createTripMessage(tripId: string, payload: {
+    operator_name?: string; category?: TripMessageCategory; body: string; is_urgent?: boolean;
+  }): Promise<TripMessage> {
+    return this._ops('POST', `/ops/trips/${encodeURIComponent(tripId)}/messages`, {
+      trip_id: tripId,
+      ...payload,
+    });
   },
 
   // Live restaurant search (SerpApi Google Maps via backend; key never reaches browser).

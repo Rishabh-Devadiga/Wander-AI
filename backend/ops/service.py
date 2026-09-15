@@ -23,6 +23,7 @@ from backend.models.models import (
     Trip,
     TripApproval,
     TripApproval,
+    TripMessage,
     User,
     Vehicle,
     Vendor,
@@ -1871,3 +1872,112 @@ def confirm_trip(db: Session, trip_id: str, user_id: Optional[str] = None) -> Di
     )
     db.commit()
     return {"already_confirmed": False, "confirmed_at": now}
+
+
+# ---------------------------------------------------------------------------
+# Trip communications (internal operator messages; traveler-invisible)
+# ---------------------------------------------------------------------------
+
+TRIP_MESSAGE_CATEGORIES = ("general", "operational", "hotel", "transport", "activity", "urgent")
+TRIP_MESSAGE_BODY_MAX_LENGTH = 2000
+
+
+def _message_dict(row: TripMessage) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "trip_id": row.trip_id,
+        "operator_name": row.operator_name,
+        "category": row.category,
+        "body": row.body,
+        "is_urgent": bool(row.is_urgent),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _require_message_category(category: Any) -> str:
+    cleaned = str(category or "general").strip().lower()
+    if cleaned not in TRIP_MESSAGE_CATEGORIES:
+        raise OpsValidation(
+            f"category must be one of: {', '.join(TRIP_MESSAGE_CATEGORIES)}"
+        )
+    return cleaned
+
+
+def _require_message_body(body: Any) -> str:
+    cleaned = str(body or "").strip()
+    if not cleaned:
+        raise OpsValidation("body is required")
+    if len(cleaned) > TRIP_MESSAGE_BODY_MAX_LENGTH:
+        raise OpsValidation(
+            f"body must be at most {TRIP_MESSAGE_BODY_MAX_LENGTH} characters"
+        )
+    return cleaned
+
+
+def list_trip_messages(
+    db: Session, trip_id: str, category: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Chronological internal messages for one trip, optionally by category."""
+    cleaned_trip = _require_trip_id(trip_id)
+    query = db.query(TripMessage).filter(TripMessage.trip_id == cleaned_trip)
+    if category is not None:
+        query = query.filter(TripMessage.category == _require_message_category(category))
+    rows = query.order_by(TripMessage.created_at.asc(), TripMessage.id.asc()).all()
+    return [_message_dict(row) for row in rows]
+
+
+def create_trip_message(
+    db: Session,
+    trip_id: str,
+    body: str,
+    operator_name: Optional[str] = None,
+    category: Optional[str] = None,
+    is_urgent: bool = False,
+) -> Dict[str, Any]:
+    """Persist one internal operator message for a trip."""
+    cleaned_trip = _require_trip_id(trip_id)
+    cleaned_body = _require_message_body(body)
+    cleaned_category = _require_message_category(category)
+    cleaned_operator = str(operator_name or "operator").strip() or "operator"
+    if len(cleaned_operator) > 100:
+        raise OpsValidation("operator_name must be at most 100 characters")
+    row = TripMessage(
+        trip_id=cleaned_trip,
+        operator_name=cleaned_operator,
+        category=cleaned_category,
+        body=cleaned_body,
+        # The urgent category is always visually urgent.
+        is_urgent=bool(is_urgent) or cleaned_category == "urgent",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _message_dict(row)
+
+
+def trip_messages_overview(db: Session) -> List[Dict[str, Any]]:
+    """Per-trip message counts for the communications trip list."""
+    from sqlalchemy import case, func
+
+    rows = (
+        db.query(
+            TripMessage.trip_id,
+            func.count(TripMessage.id).label("message_count"),
+            func.sum(case((TripMessage.is_urgent.is_(True), 1), else_=0)).label("urgent_count"),
+            func.max(TripMessage.created_at).label("latest_at"),
+        )
+        .group_by(TripMessage.trip_id)
+        .all()
+    )
+    overview = []
+    for trip_id, message_count, urgent_count, latest_at in rows:
+        overview.append(
+            {
+                "trip_id": trip_id,
+                "message_count": int(message_count or 0),
+                "urgent_count": int(urgent_count or 0),
+                "latest_at": latest_at.isoformat() if latest_at else None,
+            }
+        )
+    return overview

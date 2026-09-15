@@ -23,16 +23,19 @@ import {
   AlertCircle,
   Eye,
   Send,
-  ExternalLink
+  ExternalLink,
+  MessageSquare
 } from 'lucide-react';
 import { Trip, ItineraryItem, Booking, ChangeHistory } from '../../types/tourflow';
 import { TourFlowApi } from '../../services/api';
+import { TripCommunicationsPanel } from './TripCommunicationsPanel';
 
 interface OperatorTripWorkspaceProps {
   trip: Trip;
   onBack: () => void;
   onTripUpdated: (updatedTrip: Trip) => void;
   onTriggerDisruptionDemo: () => void;
+  operatorName?: string;
 }
 
 export const OperatorTripWorkspace: React.FC<OperatorTripWorkspaceProps> = ({
@@ -40,8 +43,9 @@ export const OperatorTripWorkspace: React.FC<OperatorTripWorkspaceProps> = ({
   onBack,
   onTripUpdated,
   onTriggerDisruptionDemo,
+  operatorName,
 }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'itinerary' | 'bookings' | 'vendors' | 'history' | 'preview'>('itinerary');
+  const [activeTab, setActiveTab] = useState<'overview' | 'itinerary' | 'bookings' | 'vendors' | 'history' | 'preview' | 'communications'>('itinerary');
   const [isAnalyzingImpact, setIsAnalyzingImpact] = useState(false);
   const [impactAnalysis, setImpactAnalysis] = useState<any | null>(null);
   const [replanOptions, setReplanOptions] = useState<any[]>([]);
@@ -192,6 +196,7 @@ export const OperatorTripWorkspace: React.FC<OperatorTripWorkspaceProps> = ({
           { id: 'bookings', label: `Bookings (${trip.bookings?.length || 0})`, icon: Ticket },
           { id: 'vendors', label: 'Assigned Vendors', icon: Building2 },
           { id: 'history', label: `Audit Log (${trip.change_history?.length || 0})`, icon: History },
+          { id: 'communications', label: 'Communications', icon: MessageSquare },
           { id: 'preview', label: 'Traveler View Live', icon: Eye },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -638,6 +643,23 @@ export const OperatorTripWorkspace: React.FC<OperatorTripWorkspaceProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* TAB CONTENT: TRIP COMMUNICATIONS (internal operator log) */}
+      {activeTab === 'communications' && (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider">Trip Communications</h3>
+              <p className="text-xs text-slate-400">Internal operator log — traveler-invisible.</p>
+            </div>
+          </div>
+          <TripCommunicationsPanel
+            key={trip.id}
+            tripId={trip.id}
+            operatorName={operatorName || 'operator'}
+          />
         </div>
       )}
 

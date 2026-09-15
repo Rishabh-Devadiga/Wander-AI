@@ -424,6 +424,34 @@ class TripApprovalRead(BaseModel):
     finalized_by: Optional[str] = None
 
 
+class TripMessageCreate(BaseModel):
+    """Internal operator message for one trip (traveler-invisible)."""
+
+    trip_id: str = Field(min_length=1, max_length=255)
+    operator_name: Optional[str] = Field(default="operator", max_length=100)
+    category: Literal["general", "operational", "hotel", "transport", "activity", "urgent"] = "general"
+    body: str = Field(min_length=1, max_length=2000)
+    is_urgent: bool = False
+
+
+class TripMessageRead(BaseModel):
+    id: str
+    trip_id: str
+    operator_name: str
+    category: str
+    body: str
+    is_urgent: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class TripMessageOverviewEntry(BaseModel):
+    trip_id: str
+    message_count: int = 0
+    urgent_count: int = 0
+    latest_at: Optional[str] = None
+
+
 class ServiceAssignmentState(BaseModel):
     assigned: bool = False
     status: str = "pending"

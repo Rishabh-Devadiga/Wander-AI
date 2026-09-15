@@ -482,3 +482,24 @@ class TripApproval(Base):
     finalized_by = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TripMessage(Base):
+    """Internal operator communication. Many rows per trip are allowed.
+
+    trip_id is an opaque key (no FK): operator-console trips live in the
+    Express store, mirroring the ops assignment tables. Messages are
+    internal-only and never surfaced to traveler-facing APIs.
+    """
+
+    __tablename__ = "trip_messages"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    trip_id = Column(String(255), nullable=False, index=True)
+    operator_name = Column(String(100), nullable=False, default="operator")
+    # general | operational | hotel | transport | activity | urgent
+    category = Column(String(50), default="general", nullable=False, index=True)
+    body = Column(Text, nullable=False)
+    is_urgent = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

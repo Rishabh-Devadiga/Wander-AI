@@ -3116,6 +3116,75 @@ def test_ops_pipeline_routes_registered_in_openapi():
 
 
 # ---------------------------------------------------------------------------
+# Trip communications (internal operator messages; traveler-invisible)
+# ---------------------------------------------------------------------------
+def test_ops_trip_messages_create_list_filter_and_overview():
+    trip_id = "ops-comms-001"
+
+    # Empty timeline for a fresh trip
+    assert client.get(f"/api/ops/trips/{trip_id}/messages").json() == []
+
+    # Create across categories; urgent category forces the urgent flag
+    first = client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": trip_id, "operator_name": "Rajesh Sharma",
+        "category": "general", "body": "Pre-departure checklist shared with the ground team.",
+    })
+    assert first.status_code == 201
+    assert first.json()["is_urgent"] is False
+
+    second = client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": trip_id, "operator_name": "Rajesh Sharma",
+        "category": "hotel", "body": "Hotel reconfirmed for all rooms.", "is_urgent": True,
+    })
+    assert second.status_code == 201
+    assert second.json()["is_urgent"] is True
+
+    third = client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": trip_id, "category": "urgent",
+        "body": "Road closure reported near the transit hub.",
+    })
+    assert third.status_code == 201
+    assert third.json()["category"] == "urgent"
+    assert third.json()["is_urgent"] is True
+    assert third.json()["operator_name"] == "operator"
+
+    # Chronological full timeline
+    timeline = client.get(f"/api/ops/trips/{trip_id}/messages").json()
+    assert [m["id"] for m in timeline] == [
+        first.json()["id"], second.json()["id"], third.json()["id"]]
+    assert all(m["trip_id"] == trip_id for m in timeline)
+
+    # Category filter
+    hotels = client.get(f"/api/ops/trips/{trip_id}/messages",
+                        params={"category": "hotel"}).json()
+    assert [m["id"] for m in hotels] == [second.json()["id"]]
+    assert client.get(f"/api/ops/trips/{trip_id}/messages",
+                      params={"category": "bogus"}).status_code == 422
+
+    # Overview aggregates per-trip counts
+    overview = {e["trip_id"]: e for e in client.get("/api/ops/messages/overview").json()}
+    assert overview[trip_id]["message_count"] == 3
+    assert overview[trip_id]["urgent_count"] == 2
+    assert overview[trip_id]["latest_at"] == third.json()["created_at"]
+
+    # Validation: blank body, bad category, mismatched trip id
+    assert client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": trip_id, "body": "   "}).status_code == 422
+    assert client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": trip_id, "category": "carrier-pigeon",
+        "body": "Hello?"}).status_code == 422
+    assert client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": "some-other-trip", "body": "Misfiled"}).status_code == 422
+    assert client.post(f"/api/ops/trips/{trip_id}/messages", json={
+        "trip_id": "  ", "body": "No trip"}).status_code == 422
+
+    # Routes registered
+    spec = client.get("/openapi.json").json()
+    for path in ("/api/ops/messages/overview", "/api/ops/trips/{trip_id}/messages"):
+        assert path in spec["paths"], path
+
+
+# ---------------------------------------------------------------------------
 # Traveler trip confirmation (planning -> confirmed, idempotent, owned)
 # ---------------------------------------------------------------------------
 def _confirm_trip_payload(destination="Manali"):

@@ -13,7 +13,8 @@ import {
   TrendingUp, 
   Sparkles,
   Layers,
-  PhoneCall
+  PhoneCall,
+  MessageSquare
 } from 'lucide-react';
 
 export type OperatorNavTab = 
@@ -27,6 +28,7 @@ export type OperatorNavTab =
   | 'vendors' 
   | 'assignment_center'
   | 'alerts' 
+  | 'communications'
   | 'ai_assistant'
   | 'analytics';
 
@@ -101,6 +103,11 @@ export const OperatorSidebar: React.FC<OperatorSidebarProps> = ({
       icon: AlertTriangle,
       badge: unresolvedAlertCount > 0 ? `${unresolvedAlertCount}` : undefined,
       badgeColor: 'bg-rose-500/20 text-rose-300 border-rose-500/30 animate-pulse',
+    },
+    {
+      id: 'communications' as OperatorNavTab,
+      label: 'Communications',
+      icon: MessageSquare,
     },
     {
       id: 'ai_assistant' as OperatorNavTab,

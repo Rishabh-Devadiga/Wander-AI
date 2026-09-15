@@ -29,6 +29,7 @@ from backend.schemas.schemas import (
     ActivityInventoryRead, TripConfirmRequest, TripConfirmResponse,
     TripApprovalRequest, TripApprovalRead, TripPipelineResponse,
     TripFinalizeRequest, TripFinalizeResponse,
+    TripMessageCreate, TripMessageRead, TripMessageOverviewEntry,
 )
 from backend.ai.gemini_service import gemini_service
 from backend.research.service import DestinationResearchService, ResearchExecutionError
@@ -972,6 +973,49 @@ def ops_finalize_trip(trip_id: str, payload: TripFinalizeRequest, db: Session = 
     from backend.ops.service import finalize_trip
     try:
         return finalize_trip(db, trip_id, payload.require_activities, payload.updated_by or "operator")
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/messages/overview", response_model=List[TripMessageOverviewEntry])
+def ops_messages_overview(db: Session = Depends(get_db)):
+    """Per-trip internal message counts (drives the Communications trip list)."""
+    from backend.ops.service import trip_messages_overview
+    try:
+        return trip_messages_overview(db)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/trips/{trip_id}/messages", response_model=List[TripMessageRead])
+def ops_list_trip_messages(
+    trip_id: str, category: Optional[str] = None, db: Session = Depends(get_db)
+):
+    """Chronological internal operator messages for one trip, optionally by category."""
+    from backend.ops.service import list_trip_messages
+    try:
+        return list_trip_messages(db, trip_id, category)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/trips/{trip_id}/messages", response_model=TripMessageRead, status_code=201)
+def ops_create_trip_message(
+    trip_id: str, payload: TripMessageCreate, db: Session = Depends(get_db)
+):
+    """Persist one internal operator message for a trip (traveler-invisible)."""
+    from backend.ops.service import OpsValidation, create_trip_message
+    try:
+        if payload.trip_id.strip() != trip_id.strip():
+            raise OpsValidation("payload trip_id must match the path trip_id")
+        return create_trip_message(
+            db,
+            trip_id,
+            payload.body,
+            payload.operator_name,
+            payload.category,
+            payload.is_urgent,
+        )
     except Exception as exc:
         raise _ops_error(exc)
 

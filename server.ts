@@ -4699,6 +4699,9 @@ const OPS_PROXY_ROUTES: Array<{ method: 'get' | 'post' | 'put'; path: string }> 
   { method: 'get', path: '/api/ops/trips/:tripId/pipeline' },
   { method: 'get', path: '/api/ops/approvals' },
   { method: 'post', path: '/api/ops/trips/:tripId/finalize' },
+  { method: 'get', path: '/api/ops/messages/overview' },
+  { method: 'get', path: '/api/ops/trips/:tripId/messages' },
+  { method: 'post', path: '/api/ops/trips/:tripId/messages' },
 ];
 
 for (const route of OPS_PROXY_ROUTES) {
