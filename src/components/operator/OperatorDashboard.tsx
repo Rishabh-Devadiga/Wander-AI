@@ -17,7 +17,7 @@ import {
   UserCheck,
   XCircle
 } from 'lucide-react';
-import { Trip } from '../../types/tourflow';
+import { Trip, TripApprovalState } from '../../types/tourflow';
 
 interface OperatorDashboardProps {
   kpis: {
@@ -31,11 +31,13 @@ interface OperatorDashboardProps {
   priorityAlerts: any[];
   activeTours: any[];
   allTrips: Trip[];
+  approvals: TripApprovalState[];
   onSelectTrip: (tripId: string) => void;
   onTriggerDisruptionDemo: () => void;
   onAcceptTripRequest: (tripId: string) => void;
   onDeclineTripRequest: (tripId: string) => void;
   onOpenReplanForTrip: (tripId: string) => void;
+  onOpenAssignmentCenter: (tripId: string) => void;
 }
 
 export const OperatorDashboard: React.FC<OperatorDashboardProps> = ({
@@ -43,13 +45,21 @@ export const OperatorDashboard: React.FC<OperatorDashboardProps> = ({
   priorityAlerts,
   activeTours,
   allTrips,
+  approvals,
   onSelectTrip,
   onTriggerDisruptionDemo,
   onAcceptTripRequest,
   onDeclineTripRequest,
   onOpenReplanForTrip,
+  onOpenAssignmentCenter,
 }) => {
   const pendingRequests = allTrips.filter((t) => t.status === 'planning');
+  const finalizedIds = new Set(
+    (approvals || []).filter((a) => a.finalized).map((a) => a.trip_id),
+  );
+  const incomingConfirmed = allTrips.filter(
+    (t) => t.status === 'confirmed' && !finalizedIds.has(t.id),
+  );
 
   return (
     <div className="space-y-6">
@@ -250,6 +260,61 @@ export const OperatorDashboard: React.FC<OperatorDashboardProps> = ({
                     title="Decline request"
                   >
                     <XCircle className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Incoming Confirmed Trips (Traveler Confirmed, Awaiting Operations) */}
+      {incomingConfirmed.length > 0 && (
+        <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-5 shadow-md">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center space-x-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+              <h2 className="text-sm font-bold text-white uppercase tracking-wider">
+                Incoming Confirmed Trips ({incomingConfirmed.length})
+              </h2>
+            </div>
+            <span className="text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              Traveler Confirmed — Operator Action Required
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            {incomingConfirmed.map((trip) => (
+              <div
+                key={trip.id}
+                className="bg-slate-950/80 border border-slate-800 hover:border-slate-700 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors"
+              >
+                <div className="space-y-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-sky-400 font-mono">#{trip.id}</span>
+                    <span className="text-sm font-bold text-white truncate">{trip.title}</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-bold uppercase">
+                      Traveler Confirmed
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                    <span>Destination: <strong className="text-slate-200">{trip.destination?.name || '—'}</strong></span>
+                    <span>Dates: <strong className="text-slate-200">{trip.start_date?.slice(0, 10) || '?'} → {trip.end_date?.slice(0, 10) || '?'}</strong></span>
+                    <span>Travelers: <strong className="text-slate-200">{trip.traveler_count}</strong></span>
+                    <span>Budget: <strong className="text-emerald-400">₹{(trip.total_budget || 0).toLocaleString()}</strong></span>
+                    <span>Payment: <strong className="text-slate-200">{(trip.bookings || []).some((b) => b.payment_status === 'paid') ? 'Paid' : 'Pending'}</strong></span>
+                    {trip.confirmed_at && <span>Confirmed: <strong className="text-slate-200">{new Date(trip.confirmed_at).toLocaleString()}</strong></span>}
+                  </div>
+                  {trip.preferences?.special_requests && (
+                    <div className="text-xs text-amber-300/90 italic">“{trip.preferences.special_requests}”</div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => onOpenAssignmentCenter(trip.id)}
+                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg shadow-sm"
+                  >
+                    Review Trip →
                   </button>
                 </div>
               </div>

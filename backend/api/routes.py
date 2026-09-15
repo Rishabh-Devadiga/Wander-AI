@@ -17,7 +17,18 @@ from backend.schemas.schemas import (
     TripManagementContext, TripManagementResult, BookingRecommendationContext,
     BookingRecommendationResult, AssistantChatContext, AssistantChatResult,
     SerpApiHotelResult, HotelSearchResponse, SelectHotelRequest,
-    LivePlace, PlacesLiveResponse, PlaceImageResponse, SerpApiRestaurantResult, RestaurantSearchResponse
+    LivePlace, PlacesLiveResponse, PlaceImageResponse, SerpApiRestaurantResult, RestaurantSearchResponse,
+    VehicleCreate, VehicleRead, DriverCreate, DriverRead,
+    AccommodationAssignRequest, AccommodationReplaceRequest, RoomAllocationRequest,
+    AccommodationIssueRequest, AccommodationAssignmentRead, PropertyRead, PropertyTripsResponse,
+    TransportAssignRequest, TransportReplaceRequest, JourneyTimingRequest, TransportStatusRequest,
+    TransportAssignmentRead, NotifyTravelerRequest, NotifyTravelerResponse,
+    ActivityAssignRequest, ActivityReplaceRequest, ActivityAllocationRequest,
+    ActivityIssueRequest, ActivityAssignmentRead, ActivityVendorsResponse,
+    OpsVendorCreate, VendorAssignmentsResponse, OpsVendorRead, VendorVerifyRequest,
+    ActivityInventoryRead, TripConfirmRequest, TripConfirmResponse,
+    TripApprovalRequest, TripApprovalRead, TripPipelineResponse,
+    TripFinalizeRequest, TripFinalizeResponse,
 )
 from backend.ai.gemini_service import gemini_service
 from backend.research.service import DestinationResearchService, ResearchExecutionError
@@ -237,6 +248,8 @@ def _trip_dict(trip: Trip, db: Session) -> Dict[str, Any]:
             "end_date": trip.end_date.isoformat() if trip.end_date else None, "duration_days": trip.duration_days,
             "total_budget": trip.total_budget, "currency": trip.currency, "traveler_count": trip.traveler_count,
             "pace": trip.pace, "discovery_session_id": trip.discovery_session_id,
+            "confirmed_at": trip.confirmed_at.isoformat() if trip.confirmed_at else None,
+            "confirmed_by": trip.confirmed_by,
             "created_at": trip.created_at.isoformat(), "updated_at": trip.updated_at.isoformat(),
             "destination": {"id": trip.destination.id, "name": trip.destination.name, "slug": trip.destination.slug,
                             "country": trip.destination.country, "state_region": trip.destination.state_region,
@@ -484,6 +497,483 @@ def search_restaurants_live(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"destination": destination.strip(), "meal_type": meal, "cuisine": (cuisine or "").strip() or None,
             "results": [SerpApiRestaurantResult(**item) for item in results], "source": "serpapi"}
+
+
+# ----------------------------------------------------
+# Operations consoles (hotels dispatch + transport dispatch)
+# ----------------------------------------------------
+def _ops_error(exc: Exception) -> HTTPException:
+    from backend.ops.service import OpsConflict, OpsForbidden, OpsNotFound, OpsValidation
+    if isinstance(exc, OpsNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, OpsForbidden):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, OpsConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, OpsValidation):
+        return HTTPException(status_code=422, detail=str(exc))
+    raise exc
+
+
+@router.get("/ops/accommodations", response_model=List[AccommodationAssignmentRead])
+def ops_list_accommodations(
+    status: Optional[str] = None, db: Session = Depends(get_db)
+):
+    """List persisted trip accommodation assignments, optionally by status."""
+    from backend.ops.service import list_accommodation_assignments
+    try:
+        return list_accommodation_assignments(db, status)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/accommodations/{trip_id}", response_model=AccommodationAssignmentRead)
+def ops_get_accommodation(trip_id: str, db: Session = Depends(get_db)):
+    """Fetch one trip's accommodation assignment."""
+    from backend.ops.service import OpsNotFound, get_accommodation_assignment
+    row = get_accommodation_assignment(db, trip_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Accommodation assignment not found for trip")
+    return row
+
+
+@router.post("/ops/accommodations", response_model=AccommodationAssignmentRead, status_code=201)
+def ops_create_accommodation(payload: AccommodationAssignRequest, db: Session = Depends(get_db)):
+    """Assign a property (from inventory) to a trip. 409 when one already exists."""
+    from backend.ops.service import create_accommodation_assignment
+    try:
+        return create_accommodation_assignment(
+            db, payload.trip_id, payload.hotel_id, payload.rooms, payload.room_type,
+            payload.check_in_date, payload.check_out_date, payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.put("/ops/accommodations/{trip_id}", response_model=AccommodationAssignmentRead)
+def ops_replace_accommodation(
+    trip_id: str, payload: AccommodationReplaceRequest, db: Session = Depends(get_db)
+):
+    """Change the property/rooms/dates of an existing trip assignment."""
+    from backend.ops.service import replace_accommodation_assignment
+    try:
+        return replace_accommodation_assignment(
+            db, trip_id, payload.hotel_id, payload.rooms, payload.room_type,
+            payload.check_in_date, payload.check_out_date, payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.put("/ops/accommodations/{trip_id}/rooms", response_model=AccommodationAssignmentRead)
+def ops_update_rooms(trip_id: str, payload: RoomAllocationRequest, db: Session = Depends(get_db)):
+    """Assign or update room allocation for a trip assignment."""
+    from backend.ops.service import update_room_allocation
+    try:
+        return update_room_allocation(
+            db, trip_id, payload.rooms, payload.room_type, payload.updated_by or "operator"
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/accommodations/{trip_id}/flag-issue", response_model=AccommodationAssignmentRead)
+def ops_flag_accommodation_issue(
+    trip_id: str, payload: AccommodationIssueRequest, db: Session = Depends(get_db)
+):
+    """Flag an assignment as an operational issue with a reason."""
+    from backend.ops.service import flag_accommodation_issue
+    try:
+        return flag_accommodation_issue(
+            db, trip_id, payload.reason, payload.updated_by or "operator"
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/accommodations/{trip_id}/resolve-issue", response_model=AccommodationAssignmentRead)
+def ops_resolve_accommodation_issue(trip_id: str, db: Session = Depends(get_db)):
+    """Clear a manual issue flag by recomputing backend status rules."""
+    from backend.ops.service import resolve_accommodation_issue
+    try:
+        return resolve_accommodation_issue(db, trip_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/properties", response_model=List[PropertyRead])
+def ops_list_properties(
+    active_only: bool = True, db: Session = Depends(get_db)
+):
+    """Property inventory from the database with live trip assignments."""
+    from backend.ops.service import list_properties
+    return list_properties(db, active_only)
+
+
+@router.get("/ops/properties/{hotel_id}/trips", response_model=PropertyTripsResponse)
+def ops_property_trips(hotel_id: str, db: Session = Depends(get_db)):
+    """All trip assignments currently using one property."""
+    from backend.ops.service import get_property_trips
+    try:
+        return get_property_trips(db, hotel_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/vehicles", response_model=List[VehicleRead])
+def ops_list_vehicles(active_only: bool = True, db: Session = Depends(get_db)):
+    """Vehicle inventory from the database."""
+    from backend.ops.service import list_vehicles
+    return list_vehicles(db, active_only)
+
+
+@router.post("/ops/vehicles", response_model=VehicleRead, status_code=201)
+def ops_create_vehicle(payload: VehicleCreate, db: Session = Depends(get_db)):
+    """Onboard a vehicle into dispatch inventory."""
+    from backend.ops.service import create_vehicle
+    try:
+        return create_vehicle(
+            db, payload.name, payload.registration_number,
+            payload.vehicle_type, payload.capacity,
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/drivers", response_model=List[DriverRead])
+def ops_list_drivers(active_only: bool = True, db: Session = Depends(get_db)):
+    """Driver roster from the database."""
+    from backend.ops.service import list_drivers
+    return list_drivers(db, active_only)
+
+
+@router.post("/ops/drivers", response_model=DriverRead, status_code=201)
+def ops_create_driver(payload: DriverCreate, db: Session = Depends(get_db)):
+    """Onboard a driver into dispatch inventory."""
+    from backend.ops.service import create_driver
+    try:
+        return create_driver(db, payload.name, payload.phone, payload.license_number)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/transport", response_model=List[TransportAssignmentRead])
+def ops_list_transport(status: Optional[str] = None, db: Session = Depends(get_db)):
+    """List persisted trip transport assignments, optionally by status."""
+    from backend.ops.service import list_transport_assignments
+    try:
+        return list_transport_assignments(db, status)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/transport/{trip_id}", response_model=TransportAssignmentRead)
+def ops_get_transport(trip_id: str, db: Session = Depends(get_db)):
+    """Fetch one trip's transport assignment."""
+    from backend.ops.service import get_transport_assignment
+    row = get_transport_assignment(db, trip_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Transport assignment not found for trip")
+    return row
+
+
+@router.post("/ops/transport", response_model=TransportAssignmentRead, status_code=201)
+def ops_create_transport(payload: TransportAssignRequest, db: Session = Depends(get_db)):
+    """Assign vehicle/driver/route/timing to a trip. 409 on resource conflicts."""
+    from backend.ops.service import create_transport_assignment
+    try:
+        return create_transport_assignment(
+            db, payload.trip_id, payload.vehicle_id, payload.driver_id,
+            payload.origin, payload.destination, payload.pickup_at, payload.dropoff_at,
+            payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.put("/ops/transport/{trip_id}", response_model=TransportAssignmentRead)
+def ops_replace_transport(
+    trip_id: str, payload: TransportReplaceRequest, db: Session = Depends(get_db)
+):
+    """Reassign vehicle/driver/route/timing for a trip."""
+    from backend.ops.service import replace_transport_assignment
+    try:
+        return replace_transport_assignment(
+            db, trip_id, payload.vehicle_id, payload.driver_id,
+            payload.origin, payload.destination, payload.pickup_at, payload.dropoff_at,
+            payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.put("/ops/transport/{trip_id}/timing", response_model=TransportAssignmentRead)
+def ops_update_timing(trip_id: str, payload: JourneyTimingRequest, db: Session = Depends(get_db)):
+    """Update pickup/drop-off times and route for a trip assignment."""
+    from backend.ops.service import update_journey_timing
+    try:
+        return update_journey_timing(
+            db, trip_id, payload.pickup_at, payload.dropoff_at,
+            payload.origin, payload.destination, payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/transport/{trip_id}/status", response_model=TransportAssignmentRead)
+def ops_transport_status(
+    trip_id: str, payload: TransportStatusRequest, db: Session = Depends(get_db)
+):
+    """Advance the journey lifecycle (pending->assigned->en_route->completed, delay handling)."""
+    from backend.ops.service import transition_transport_status
+    try:
+        return transition_transport_status(
+            db, trip_id, payload.to_status, payload.delay_reason,
+            payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/transport/{trip_id}/notify", response_model=NotifyTravelerResponse, status_code=201)
+def ops_notify_traveler(
+    trip_id: str, payload: NotifyTravelerRequest, db: Session = Depends(get_db)
+):
+    """Persist a traveler notification built from real assignment facts."""
+    from backend.ops.service import notify_traveler
+    try:
+        return notify_traveler(db, trip_id, payload.event, payload.note, payload.updated_by or "operator")
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/activities", response_model=List[ActivityAssignmentRead])
+def ops_list_activities(
+    trip_id: Optional[str] = None,
+    status: Optional[str] = None,
+    vendor_id: Optional[str] = None,
+    scheduled_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List persisted trip activity assignments with backend filters."""
+    from backend.ops.service import list_activity_assignments
+    try:
+        return list_activity_assignments(db, trip_id, status, vendor_id, scheduled_date)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/activities/{assignment_id}", response_model=ActivityAssignmentRead)
+def ops_get_activity(assignment_id: str, db: Session = Depends(get_db)):
+    """Fetch one activity assignment with its full operational context."""
+    from backend.ops.service import get_activity_assignment
+    try:
+        return get_activity_assignment(db, assignment_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/activities", response_model=ActivityAssignmentRead, status_code=201)
+def ops_create_activity(payload: ActivityAssignRequest, db: Session = Depends(get_db)):
+    """Assign an activity (from inventory) to a trip. 409 on conflicts."""
+    from backend.ops.service import create_activity_assignment
+    try:
+        return create_activity_assignment(
+            db, payload.trip_id, payload.activity_id, payload.vendor_id,
+            payload.scheduled_date, payload.start_time, payload.end_time,
+            payload.participants, payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.put("/ops/activities/{assignment_id}", response_model=ActivityAssignmentRead)
+def ops_replace_activity(
+    assignment_id: str, payload: ActivityReplaceRequest, db: Session = Depends(get_db)
+):
+    """Change activity/vendor/schedule/allocation of an assignment."""
+    from backend.ops.service import replace_activity_assignment
+    try:
+        return replace_activity_assignment(
+            db, assignment_id, payload.activity_id, payload.vendor_id,
+            bool(payload.vendor_cleared), payload.scheduled_date, payload.start_time,
+            payload.end_time, payload.participants, payload.updated_by or "operator",
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.put("/ops/activities/{assignment_id}/allocation", response_model=ActivityAssignmentRead)
+def ops_update_allocation(
+    assignment_id: str, payload: ActivityAllocationRequest, db: Session = Depends(get_db)
+):
+    """Adjust participant allocation; capacity conflicts rejected with 409."""
+    from backend.ops.service import update_activity_allocation
+    try:
+        return update_activity_allocation(
+            db, assignment_id, payload.participants, payload.updated_by or "operator"
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/activities/{assignment_id}/confirm", response_model=ActivityAssignmentRead)
+def ops_confirm_activity(assignment_id: str, db: Session = Depends(get_db)):
+    """Confirm a complete, validated assignment. 422 when incomplete."""
+    from backend.ops.service import confirm_activity_assignment
+    try:
+        return confirm_activity_assignment(db, assignment_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/activities/{assignment_id}/flag-issue", response_model=ActivityAssignmentRead)
+def ops_flag_activity_issue(
+    assignment_id: str, payload: ActivityIssueRequest, db: Session = Depends(get_db)
+):
+    """Flag an assignment as an operational issue with a reason."""
+    from backend.ops.service import flag_activity_issue
+    try:
+        return flag_activity_issue(db, assignment_id, payload.reason)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/activities/{assignment_id}/resolve-issue", response_model=ActivityAssignmentRead)
+def ops_resolve_activity_issue(assignment_id: str, db: Session = Depends(get_db)):
+    """Clear a manual issue flag by re-running backend validation."""
+    from backend.ops.service import resolve_activity_issue
+    try:
+        return resolve_activity_issue(db, assignment_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/activity-inventory/{activity_id}/vendors", response_model=ActivityVendorsResponse)
+def ops_eligible_vendors(activity_id: str, db: Session = Depends(get_db)):
+    """Verified vendors eligible for one activity."""
+    from backend.ops.service import list_eligible_vendors
+    try:
+        return list_eligible_vendors(db, activity_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/vendors", status_code=201)
+def ops_create_vendor(payload: OpsVendorCreate, db: Session = Depends(get_db)):
+    """Onboard a vendor into operations inventory."""
+    from backend.ops.service import create_ops_vendor
+    try:
+        return create_ops_vendor(
+            db, payload.name, payload.vendor_type, payload.contact_email, payload.phone
+        )
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/vendors/{vendor_id}/assignments", response_model=VendorAssignmentsResponse)
+def ops_vendor_assignments(vendor_id: str, db: Session = Depends(get_db)):
+    """All activity assignments (and their trips) for one vendor."""
+    from backend.ops.service import get_vendor_assignments
+    try:
+        return get_vendor_assignments(db, vendor_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/vendors", response_model=List[OpsVendorRead])
+def ops_list_vendors(vendor_type: Optional[str] = None, db: Session = Depends(get_db)):
+    """Vendor inventory with live assignment counts."""
+    from backend.ops.service import list_ops_vendors
+    return list_ops_vendors(db, vendor_type)
+
+
+@router.post("/ops/vendors/{vendor_id}/verify", response_model=OpsVendorRead)
+def ops_verify_vendor(vendor_id: str, payload: VendorVerifyRequest, db: Session = Depends(get_db)):
+    """Set vendor verified status (drives assignment eligibility)."""
+    from backend.ops.service import set_vendor_verified
+    try:
+        return set_vendor_verified(db, vendor_id, payload.is_verified)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/activity-inventory", response_model=List[ActivityInventoryRead])
+def ops_activity_inventory(
+    destination_id: Optional[str] = None, db: Session = Depends(get_db)
+):
+    """Bookable activity inventory for assignment pickers."""
+    from backend.ops.service import list_activity_inventory
+    return list_activity_inventory(db, destination_id)
+
+
+@router.post("/trips/{trip_id}/confirm", response_model=TripConfirmResponse)
+def confirm_trip_route(trip_id: str, payload: TripConfirmRequest, db: Session = Depends(get_db)):
+    """Validate and persist traveler confirmation (planning -> confirmed).
+
+    Idempotent: reconfirming returns the existing confirmed state without
+    duplicating history or notifications. No ops assignments are fabricated;
+    operators attach inventory through the consoles afterwards.
+    """
+    from backend.ops.service import confirm_trip
+    try:
+        result = confirm_trip(db, trip_id, payload.user_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    return {
+        "status": "success",
+        "already_confirmed": result["already_confirmed"],
+        "confirmed_at": result["confirmed_at"],
+        "trip": _trip_dict(trip, db),
+    }
+
+
+@router.post("/ops/trips/{trip_id}/approve", response_model=TripApprovalRead)
+def ops_approve_trip(trip_id: str, payload: TripApprovalRequest, db: Session = Depends(get_db)):
+    """Operator approves a traveler-confirmed trip (idempotent)."""
+    from backend.ops.service import approve_trip
+    try:
+        return approve_trip(db, trip_id, payload.updated_by or "operator")
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.post("/ops/trips/{trip_id}/accept", response_model=TripApprovalRead)
+def ops_accept_trip(trip_id: str, payload: TripApprovalRequest, db: Session = Depends(get_db)):
+    """Start the assignment workflow (Accept & Assign). Requires approval."""
+    from backend.ops.service import accept_trip_assignment
+    try:
+        return accept_trip_assignment(db, trip_id, payload.updated_by or "operator")
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/trips/{trip_id}/pipeline", response_model=TripPipelineResponse)
+def ops_trip_pipeline(trip_id: str, db: Session = Depends(get_db)):
+    """Combined approval + service-assignment state for the Assignment Center."""
+    from backend.ops.service import get_trip_pipeline
+    try:
+        return get_trip_pipeline(db, trip_id)
+    except Exception as exc:
+        raise _ops_error(exc)
+
+
+@router.get("/ops/approvals", response_model=List[TripApprovalRead])
+def ops_list_approvals(db: Session = Depends(get_db)):
+    """All operator pipeline states (drives dashboard Incoming/Active splits)."""
+    from backend.ops.service import list_trip_approvals
+    return list_trip_approvals(db)
+
+
+@router.post("/ops/trips/{trip_id}/finalize", response_model=TripFinalizeResponse)
+def ops_finalize_trip(trip_id: str, payload: TripFinalizeRequest, db: Session = Depends(get_db)):
+    """Finalize an approved trip: validate completeness, lock, notify."""
+    from backend.ops.service import finalize_trip
+    try:
+        return finalize_trip(db, trip_id, payload.require_activities, payload.updated_by or "operator")
+    except Exception as exc:
+        raise _ops_error(exc)
 
 
 # ----------------------------------------------------

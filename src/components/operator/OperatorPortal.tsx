@@ -9,12 +9,13 @@ import { OperatorItineraries } from './OperatorItineraries';
 import { OperatorHotels } from './OperatorHotels';
 import { OperatorTransport } from './OperatorTransport';
 import { OperatorVendors } from './OperatorVendors';
+import { OperatorAssignmentFlow } from './OperatorAssignmentFlow';
 import { OperatorBookings } from './OperatorBookings';
 import { OperatorAlerts } from './OperatorAlerts';
 import { OperatorAiAssistant } from './OperatorAiAssistant';
 import { OperatorAnalytics } from './OperatorAnalytics';
 import { TourFlowApi } from '../../services/api';
-import type { OperatorVendor, Trip } from '../../types/tourflow';
+import type { Trip, TripApprovalState } from '../../types/tourflow';
 
 interface OperatorPortalProps {
   onSwitchToTraveler: () => void;
@@ -47,10 +48,11 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
   const [currentTab, setCurrentTab] = useState<OperatorNavTab>('dashboard');
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
+  const [focusOpsTripId, setFocusOpsTripId] = useState<string | null>(null);
+  const [approvals, setApprovals] = useState<TripApprovalState[]>([]);
 
   const [dashboardData, setDashboardData] = useState<any | null>(null);
   const [allTrips, setAllTrips] = useState<Trip[]>([]);
-  const [vendors, setVendors] = useState<OperatorVendor[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [analyticsData, setAnalyticsData] = useState<any | null>(null);
@@ -63,10 +65,9 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
   const fetchAllData = useCallback(async () => {
     setIsSyncing(true);
     try {
-      const [dash, tripsList, vends, bkgs, alrts, analytics] = await Promise.all([
+      const [dash, tripsList, bkgs, alrts, analytics] = await Promise.all([
         TourFlowApi.getOperatorDashboard(),
         TourFlowApi.getTrips(),
-        TourFlowApi.getOperatorVendors(),
         TourFlowApi.getOperatorBookings(),
         TourFlowApi.getOperatorAlerts(),
         TourFlowApi.getOperatorAnalytics(),
@@ -74,7 +75,6 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
 
       if (dash) setDashboardData(dash);
       if (tripsList) setAllTrips(tripsList);
-      if (vends) setVendors(vends);
       if (bkgs) setBookings(bkgs);
       if (alrts) setAlerts(alrts);
       if (analytics) setAnalyticsData(analytics);
@@ -118,6 +118,36 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
 
     return () => clearInterval(interval);
   }, [operatorUser, lastVersion, fetchAllData]);
+
+  // Operator pipeline states live in the FastAPI database (outside trip sync
+  // versioning), so refresh them on their own 30s cadence.
+  useEffect(() => {
+    if (!operatorUser) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const rows = await TourFlowApi.getTripApprovals();
+        if (!cancelled) setApprovals(rows || []);
+      } catch {
+        // consoles surface backend errors themselves
+      }
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [operatorUser]);
+
+  const openAssignmentCenter = (tripId: string) => {
+    setFocusOpsTripId(tripId);
+    setCurrentTab('assignment_center');
+  };
+
+  const navigateToService = (tab: 'hotels' | 'transport' | 'vendors') => {
+    setCurrentTab(tab);
+  };
 
   // When selectedTripId changes, fetch trip
   useEffect(() => {
@@ -172,16 +202,6 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
     }
   };
 
-  const handleToggleVendor = async (vendorId: string) => {
-    try {
-      await TourFlowApi.toggleVendor(vendorId);
-      const v = await TourFlowApi.getOperatorVendors();
-      setVendors(v);
-    } catch (err) {
-      console.error('Vendor toggle error', err);
-    }
-  };
-
   const handleBookingAction = async (bookingId: string, action: 'confirm' | 'cancel' | 'rebook') => {
     try {
       await TourFlowApi.updateBookingAction(bookingId, action);
@@ -210,7 +230,14 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
   }
 
   const unresolvedAlertCount = (alerts || []).filter((a) => !a.is_resolved).length;
-  const activeToursCount = (allTrips || []).filter((t) => ['ongoing', 'confirmed'].includes(t.status) && t.id !== 'trp-manali-alpine-demo-001').length;
+  const isActiveTour = (t: Trip) => {
+    if (t.id === 'trp-manali-alpine-demo-001') return false;
+    if (t.status === 'ongoing') return true;
+    if (t.status !== 'confirmed') return false;
+    const approval = approvals.find((a) => a.trip_id === t.id);
+    return Boolean(approval && approval.finalized);
+  };
+  const activeToursCount = (allTrips || []).filter(isActiveTour).length;
   const pendingRequestsCount = (allTrips || []).filter((t) => t.status === 'planning').length;
 
   return (
@@ -274,6 +301,7 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                   priorityAlerts={dashboardData?.priority_alerts || []}
                   activeTours={dashboardData?.active_tours_table || []}
                   allTrips={allTrips}
+                  approvals={approvals}
                   onSelectTrip={(id) => setSelectedTripId(id)}
                   onTriggerDisruptionDemo={handleTriggerDisruptionDemo}
                   onAcceptTripRequest={handleAcceptTripRequest}
@@ -281,6 +309,7 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                   onOpenReplanForTrip={(id) => {
                     setSelectedTripId(id);
                   }}
+                  onOpenAssignmentCenter={openAssignmentCenter}
                 />
               )}
 
@@ -299,14 +328,14 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                     <div>
                       <h1 className="text-2xl font-bold text-white tracking-tight">Active & On-Ground Tours</h1>
                       <p className="text-sm text-slate-400 mt-0.5">
-                        Comprehensive manifest of all active traveler groups, live timelines, and partner assignments.
+                        Finalized operational tours (ongoing, or confirmed + finalized). Traveler-confirmed trips awaiting operations live on the Dashboard.
                       </p>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {allTrips
-                      .filter((t) => ['ongoing', 'confirmed'].includes(t.status) && t.id !== 'trp-manali-alpine-demo-001')
+                      .filter(isActiveTour)
                       .map((t) => (
                         <div
                           key={t.id}
@@ -374,6 +403,8 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                 <OperatorHotels
                   trips={allTrips}
                   onSelectTrip={(id) => setSelectedTripId(id)}
+                  focusTripId={focusOpsTripId}
+                  onClearFocus={() => setFocusOpsTripId(null)}
                 />
               )}
 
@@ -381,14 +412,39 @@ export const OperatorPortal: React.FC<OperatorPortalProps> = ({ onSwitchToTravel
                 <OperatorTransport
                   trips={allTrips}
                   onSelectTrip={(id) => setSelectedTripId(id)}
+                  focusTripId={focusOpsTripId}
+                  onClearFocus={() => setFocusOpsTripId(null)}
                 />
               )}
 
               {currentTab === 'vendors' && (
                 <OperatorVendors
-                  vendors={vendors}
-                  onToggleVendor={handleToggleVendor}
+                  trips={allTrips}
+                  onSelectTrip={(id) => setSelectedTripId(id)}
+                  focusTripId={focusOpsTripId}
+                  onClearFocus={() => setFocusOpsTripId(null)}
                 />
+              )}
+
+              {currentTab === 'assignment_center' && (
+                focusOpsTripId && allTrips.some((t) => t.id === focusOpsTripId) ? (
+                  <OperatorAssignmentFlow
+                    trip={allTrips.find((t) => t.id === focusOpsTripId) as Trip}
+                    onNavigateService={navigateToService}
+                    onPipelineChange={async () => {
+                      try {
+                        setApprovals((await TourFlowApi.getTripApprovals()) || []);
+                      } catch {
+                        // consoles surface backend errors themselves
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-slate-400">
+                    <div className="font-bold text-white text-sm">No Trip Selected</div>
+                    <p className="text-xs mt-1">Open a traveler-confirmed trip from the Dashboard to start its assignment workflow.</p>
+                  </div>
+                )
               )}
 
               {currentTab === 'alerts' && (

@@ -98,6 +98,7 @@ class ActivityBase(BaseModel):
     currency: str = "INR"
     difficulty_level: str = "moderate"
     rating: float = 4.7
+    capacity: Optional[int] = None
     images: Optional[List[str]] = []
     description: Optional[str] = None
     meeting_point: Optional[str] = None
@@ -356,6 +357,8 @@ class TripBase(BaseModel):
     traveler_count: Optional[int] = 2
     pace: Optional[str] = "balanced"
     discovery_session_id: Optional[str] = None
+    confirmed_at: Optional[datetime] = None
+    confirmed_by: Optional[str] = None
 
 class TripCreate(TripBase):
     user_id: Optional[str] = None
@@ -392,6 +395,77 @@ class TripRead(TripBase):
     notifications: List[NotificationRead] = []
     change_history: List[ChangeHistoryRead] = []
     reviews: List[ReviewRead] = []
+
+
+class TripConfirmRequest(BaseModel):
+    user_id: Optional[str] = Field(default=None, max_length=36)
+
+
+class TripConfirmResponse(BaseModel):
+    status: str = Field(description="success")
+    already_confirmed: bool = False
+    confirmed_at: Optional[datetime] = None
+    trip: TripRead
+
+
+class TripApprovalRequest(BaseModel):
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class TripApprovalRead(BaseModel):
+    trip_id: str
+    approved: bool = False
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+    assignment_started: bool = False
+    assignment_started_at: Optional[datetime] = None
+    finalized: bool = False
+    finalized_at: Optional[datetime] = None
+    finalized_by: Optional[str] = None
+
+
+class ServiceAssignmentState(BaseModel):
+    assigned: bool = False
+    status: str = "pending"
+    assignment_id: Optional[str] = None
+
+
+class ActivityServiceState(BaseModel):
+    assigned_count: int = 0
+    total_count: int = 0
+    assigned: bool = False
+
+
+class PipelineServices(BaseModel):
+    hotel: ServiceAssignmentState = Field(default_factory=ServiceAssignmentState)
+    transport: ServiceAssignmentState = Field(default_factory=ServiceAssignmentState)
+    activities: ActivityServiceState = Field(default_factory=ActivityServiceState)
+
+
+class PipelineProgress(BaseModel):
+    assigned: int = 0
+    total: int = 3
+
+
+class TripPipelineResponse(BaseModel):
+    trip_id: str
+    approval: TripApprovalRead
+    services: PipelineServices
+    progress: PipelineProgress
+
+
+class TripFinalizeRequest(BaseModel):
+    require_activities: bool = True
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class TripFinalizeResponse(BaseModel):
+    trip_id: str
+    finalized: bool = True
+    finalized_at: Optional[datetime] = None
+    services: PipelineServices
+    traveler_notified: bool = True
+    partners: List[Dict[str, Any]] = Field(default_factory=list)
 
 # AI Service Schemas
 class AIChatRequest(BaseModel):
@@ -835,3 +909,281 @@ class AssistantChatResult(BaseModel):
     suggested_actions: List[str] = Field(default_factory=list)
     source: str = Field(description="catalog_fallback or crewai")
     context_validated: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Operations consoles (hotels dispatch + transport dispatch).
+# Inventory rows come from the database; assignments persist per trip and all
+# status values are computed or transition-validated by backend rules.
+# ---------------------------------------------------------------------------
+
+class VehicleCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    registration_number: str = Field(min_length=1, max_length=50)
+    vehicle_type: str = Field(default="private_cab", max_length=50)
+    capacity: int = Field(default=4, ge=1, le=200)
+
+
+class VehicleRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    registration_number: str
+    vehicle_type: str
+    capacity: int
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+
+class DriverCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+    license_number: Optional[str] = Field(default=None, max_length=100)
+
+
+class DriverRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    phone: Optional[str] = None
+    license_number: Optional[str] = None
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+
+class AccommodationAssignRequest(BaseModel):
+    trip_id: str = Field(min_length=1, max_length=255)
+    hotel_id: Optional[str] = Field(default=None, max_length=36)
+    rooms: Optional[int] = Field(default=None, ge=0, le=500)
+    room_type: Optional[str] = Field(default=None, max_length=255)
+    check_in_date: Optional[str] = Field(default=None, max_length=10)
+    check_out_date: Optional[str] = Field(default=None, max_length=10)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class AccommodationReplaceRequest(BaseModel):
+    hotel_id: Optional[str] = Field(default=None, max_length=36)
+    rooms: Optional[int] = Field(default=None, ge=0, le=500)
+    room_type: Optional[str] = Field(default=None, max_length=255)
+    check_in_date: Optional[str] = Field(default=None, max_length=10)
+    check_out_date: Optional[str] = Field(default=None, max_length=10)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class RoomAllocationRequest(BaseModel):
+    rooms: Optional[int] = Field(default=None, ge=0, le=500)
+    room_type: Optional[str] = Field(default=None, max_length=255)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class AccommodationIssueRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class AccommodationAssignmentRead(BaseModel):
+    id: str
+    trip_id: str
+    hotel_id: Optional[str] = None
+    hotel: Optional[Dict[str, Any]] = None
+    rooms: Optional[int] = None
+    room_type: Optional[str] = None
+    check_in_date: Optional[str] = None
+    check_out_date: Optional[str] = None
+    status: str
+    issue_reason: Optional[str] = None
+    updated_by: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class PropertyRead(BaseModel):
+    id: str
+    name: str
+    address: Optional[str] = None
+    category: str
+    rating: float
+    price_per_night: float
+    currency: str
+    is_active: bool
+    destination_id: str
+    destination_name: Optional[str] = None
+    assigned_trip_ids: List[str] = Field(default_factory=list)
+    assigned_trip_count: int = 0
+
+
+class PropertyTripsResponse(BaseModel):
+    hotel: Dict[str, Any]
+    assignments: List[AccommodationAssignmentRead] = Field(default_factory=list)
+
+
+class TransportAssignRequest(BaseModel):
+    trip_id: str = Field(min_length=1, max_length=255)
+    vehicle_id: Optional[str] = Field(default=None, max_length=36)
+    driver_id: Optional[str] = Field(default=None, max_length=36)
+    origin: Optional[str] = Field(default=None, max_length=255)
+    destination: Optional[str] = Field(default=None, max_length=255)
+    pickup_at: Optional[str] = Field(default=None, max_length=64)
+    dropoff_at: Optional[str] = Field(default=None, max_length=64)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class TransportReplaceRequest(BaseModel):
+    vehicle_id: Optional[str] = Field(default=None, max_length=36)
+    driver_id: Optional[str] = Field(default=None, max_length=36)
+    origin: Optional[str] = Field(default=None, max_length=255)
+    destination: Optional[str] = Field(default=None, max_length=255)
+    pickup_at: Optional[str] = Field(default=None, max_length=64)
+    dropoff_at: Optional[str] = Field(default=None, max_length=64)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class JourneyTimingRequest(BaseModel):
+    pickup_at: Optional[str] = Field(default=None, max_length=64)
+    dropoff_at: Optional[str] = Field(default=None, max_length=64)
+    origin: Optional[str] = Field(default=None, max_length=255)
+    destination: Optional[str] = Field(default=None, max_length=255)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class TransportStatusRequest(BaseModel):
+    to_status: str = Field(min_length=1, max_length=50)
+    delay_reason: Optional[str] = Field(default=None, max_length=1000)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class TransportAssignmentRead(BaseModel):
+    id: str
+    trip_id: str
+    vehicle_id: Optional[str] = None
+    vehicle: Optional[Dict[str, Any]] = None
+    driver_id: Optional[str] = None
+    driver: Optional[Dict[str, Any]] = None
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    pickup_at: Optional[str] = None
+    dropoff_at: Optional[str] = None
+    status: str
+    pre_delay_status: Optional[str] = None
+    delay_reason: Optional[str] = None
+    updated_by: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class NotifyTravelerRequest(BaseModel):
+    event: str = Field(min_length=1, max_length=50)
+    note: Optional[str] = Field(default=None, max_length=500)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class NotifyTravelerResponse(BaseModel):
+    id: str
+    trip_id: str
+    user_id: str
+    title: str
+    message: str
+    type: str
+    created_at: Optional[str] = None
+
+
+class ActivityAssignRequest(BaseModel):
+    trip_id: str = Field(min_length=1, max_length=255)
+    activity_id: str = Field(min_length=1, max_length=36)
+    vendor_id: Optional[str] = Field(default=None, max_length=36)
+    scheduled_date: Optional[str] = Field(default=None, max_length=10)
+    start_time: Optional[str] = Field(default=None, max_length=16)
+    end_time: Optional[str] = Field(default=None, max_length=16)
+    participants: Optional[int] = Field(default=None, ge=0, le=10000)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class ActivityReplaceRequest(BaseModel):
+    activity_id: Optional[str] = Field(default=None, max_length=36)
+    vendor_id: Optional[str] = Field(default=None, max_length=36)
+    vendor_cleared: Optional[bool] = False
+    scheduled_date: Optional[str] = Field(default=None, max_length=10)
+    start_time: Optional[str] = Field(default=None, max_length=16)
+    end_time: Optional[str] = Field(default=None, max_length=16)
+    participants: Optional[int] = Field(default=None, ge=0, le=10000)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class ActivityAllocationRequest(BaseModel):
+    participants: Optional[int] = Field(default=None, ge=0, le=10000)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class ActivityIssueRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class ActivityAssignmentRead(BaseModel):
+    id: str
+    trip_id: str
+    activity_id: str
+    activity: Optional[Dict[str, Any]] = None
+    vendor_id: Optional[str] = None
+    vendor: Optional[Dict[str, Any]] = None
+    scheduled_date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    participants: Optional[int] = None
+    remaining_capacity: Optional[int] = None
+    price: Optional[Dict[str, Any]] = None
+    status: str
+    issue_reason: Optional[str] = None
+    updated_by: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ActivityVendorsResponse(BaseModel):
+    activity: Dict[str, Any]
+    vendors: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class OpsVendorCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    vendor_type: str = Field(default="activity", max_length=50)
+    contact_email: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+
+
+class VendorAssignmentsResponse(BaseModel):
+    vendor: Dict[str, Any]
+    assignments: List[ActivityAssignmentRead] = Field(default_factory=list)
+    assigned_trip_ids: List[str] = Field(default_factory=list)
+    assigned_trip_count: int = 0
+
+
+class OpsVendorRead(BaseModel):
+    id: str
+    name: str
+    vendor_type: str
+    phone: Optional[str] = None
+    contact_email: Optional[str] = None
+    rating: float
+    is_verified: bool
+    assigned_trip_ids: List[str] = Field(default_factory=list)
+    assigned_trip_count: int = 0
+
+
+class VendorVerifyRequest(BaseModel):
+    is_verified: bool
+    updated_by: Optional[str] = Field(default="operator", max_length=50)
+
+
+class ActivityInventoryRead(BaseModel):
+    id: str
+    title: str
+    category: str
+    duration_hours: float
+    price_per_person: float
+    currency: str
+    rating: float
+    capacity: Optional[int] = None
+    destination_id: str
+    destination_name: Optional[str] = None
+    is_active: bool

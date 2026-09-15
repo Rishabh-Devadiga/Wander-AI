@@ -2396,6 +2396,822 @@ def test_no_hardcoded_restaurant_data_in_service():
     assert "local_results" in source and "google_maps" in source
 
 
+def test_no_hardcoded_restaurant_data_in_service():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, "backend", "restaurants", "service.py")
+    with open(path, encoding="utf-8") as handle:
+        source = handle.read().lower()
+    banned_chains = ["mcdonald", "starbucks", "dominos", "pizza hut", "kfc",
+                     "quanjude", "keventers", "bukhara", "karim"]
+    assert not any(chain in source for chain in banned_chains)
+    assert "local_results" in source and "google_maps" in source
+
+
+# ---------------------------------------------------------------------------
+# Operations consoles: hotels dispatch (assignments, rooms, properties)
+# ---------------------------------------------------------------------------
+def _ops_approve(trip_id):
+    response = client.post(f"/api/ops/trips/{trip_id}/approve", json={})
+    assert response.status_code == 200
+    return response.json()
+def _ops_hotel_id(destination_name="Manali"):
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Destination, Hotel
+    db = SessionLocal()
+    try:
+        dest = db.query(Destination).filter(Destination.name == destination_name).first()
+        assert dest is not None
+        hotel = db.query(Hotel).filter(
+            Hotel.destination_id == dest.id, Hotel.is_active == True).first()  # noqa: E712
+        assert hotel is not None
+        return hotel.id, hotel.name
+    finally:
+        db.close()
+
+
+def test_ops_properties_come_from_database():
+    response = client.get("/api/ops/properties")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) > 0
+    names = [p["name"] for p in body]
+    assert any("Manali" in (p.get("destination_name") or "") for p in body)
+    first = body[0]
+    assert first["assigned_trip_count"] == len(first["assigned_trip_ids"])
+    assert first["price_per_night"] > 0
+
+
+def test_ops_accommodation_lifecycle_and_status_rules(monkeypatch):
+    hotel_id, _ = _ops_hotel_id()
+    trip_id = "ops-trip-hotels-001"
+    _ops_approve(trip_id)
+    _ops_approve("ops-trip-hotels-404")
+
+    # Assign with rooms -> assigned
+    created = client.post("/api/ops/accommodations", json={
+        "trip_id": trip_id, "hotel_id": hotel_id, "rooms": 2,
+        "room_type": "Deluxe", "check_in_date": "2026-11-01", "check_out_date": "2026-11-04",
+    })
+    assert created.status_code == 201
+    assert created.json()["status"] == "assigned"
+    assert created.json()["hotel"]["id"] == hotel_id
+
+    # Duplicate POST -> 409
+    assert client.post("/api/ops/accommodations", json={
+        "trip_id": trip_id, "hotel_id": hotel_id}).status_code == 409
+
+    # Unknown property -> 404
+    assert client.post("/api/ops/accommodations", json={
+        "trip_id": "ops-trip-hotels-404", "hotel_id": "no-such-hotel"}).status_code == 404
+
+    # Blank trip -> 422
+    assert client.post("/api/ops/accommodations", json={
+        "trip_id": "  ", "hotel_id": hotel_id}).status_code == 422
+
+    # Remove rooms -> issue (missing required allocation)
+    updated = client.put(f"/api/ops/accommodations/{trip_id}/rooms", json={"rooms": 0})
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "issue"
+
+    # Restore rooms -> assigned again
+    restored = client.put(f"/api/ops/accommodations/{trip_id}/rooms",
+                          json={"rooms": 1, "room_type": "Suite"})
+    assert restored.json()["status"] == "assigned"
+    assert restored.json()["room_type"] == "Suite"
+
+    # Manual flag and resolve
+    flagged = client.post(f"/api/ops/accommodations/{trip_id}/flag-issue",
+                          json={"reason": "Overbooked for Diwali week"})
+    assert flagged.json()["status"] == "issue"
+    assert "Diwali" in flagged.json()["issue_reason"]
+    resolved = client.post(f"/api/ops/accommodations/{trip_id}/resolve-issue", json={})
+    assert resolved.json()["status"] == "assigned"
+
+    # Change to no hotel -> pending
+    changed = client.put(f"/api/ops/accommodations/{trip_id}", json={"hotel_id": None})
+    assert changed.json()["status"] == "pending"
+
+    # Get single + filtered list
+    assert client.get(f"/api/ops/accommodations/{trip_id}").status_code == 200
+    assigned_only = client.get("/api/ops/accommodations", params={"status": "assigned"})
+    assert all(a["status"] == "assigned" for a in assigned_only.json())
+    assert client.get("/api/ops/accommodations/no-such-trip").status_code == 404
+
+
+def test_ops_property_trips_two_way_relationship():
+    hotel_id, hotel_name = _ops_hotel_id()
+    trip_id = "ops-trip-hotels-002"
+    _ops_approve(trip_id)
+    created = client.post("/api/ops/accommodations", json={
+        "trip_id": trip_id, "hotel_id": hotel_id, "rooms": 1})
+    assert created.status_code == 201
+
+    detail = client.get(f"/api/ops/properties/{hotel_id}/trips")
+    assert detail.status_code == 200
+    assert detail.json()["hotel"]["name"] == hotel_name
+    assert trip_id in [a["trip_id"] for a in detail.json()["assignments"]]
+
+    props = client.get("/api/ops/properties").json()
+    row = next(p for p in props if p["id"] == hotel_id)
+    assert trip_id in row["assigned_trip_ids"]
+    assert row["assigned_trip_count"] >= 1
+    assert client.get("/api/ops/properties/no-such-hotel/trips").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Operations consoles: transport dispatch (fleet, assignments, lifecycle)
+# ---------------------------------------------------------------------------
+def _ops_vehicle_and_driver():
+    vehicles = client.get("/api/ops/vehicles").json()
+    drivers = client.get("/api/ops/drivers").json()
+    assert len(vehicles) > 0 and len(drivers) > 0
+    assert all(v["registration_number"] for v in vehicles)
+    assert all(d["name"] for d in drivers)
+    return vehicles[0]["id"], drivers[0]["id"]
+
+
+def test_ops_fleet_inventory_and_onboarding():
+    vehicles = client.get("/api/ops/vehicles").json()
+    assert any(v["capacity"] >= 1 for v in vehicles)
+
+    created = client.post("/api/ops/vehicles", json={
+        "name": "Ops Test Van", "registration_number": "HP99-OPS-0001",
+        "vehicle_type": "private_cab", "capacity": 7})
+    assert created.status_code == 201
+    assert created.json()["is_active"] is True
+
+    dup = client.post("/api/ops/vehicles", json={
+        "name": "Ops Test Van 2", "registration_number": "HP99-OPS-0001"})
+    assert dup.status_code == 409
+
+    driver = client.post("/api/ops/drivers", json={
+        "name": "Ops Test Driver", "phone": "+91 90000 00001"})
+    assert driver.status_code == 201
+    assert driver.json()["name"] == "Ops Test Driver"
+    assert client.post("/api/ops/drivers", json={"name": "  "}).status_code == 422
+
+
+def test_ops_transport_lifecycle_and_conflicts():
+    vehicle_id, driver_id = _ops_vehicle_and_driver()
+    trip_a = "ops-trip-transport-001"
+    trip_b = "ops-trip-transport-002"
+    _ops_approve(trip_a)
+    _ops_approve(trip_b)
+    _ops_approve("ops-trip-x")
+
+    created = client.post("/api/ops/transport", json={
+        "trip_id": trip_a, "vehicle_id": vehicle_id, "driver_id": driver_id,
+        "origin": "Delhi", "destination": "Manali",
+        "pickup_at": "2026-11-01T09:00:00", "dropoff_at": "2026-11-01T18:00:00"})
+    assert created.status_code == 201
+    body = created.json()
+    assert body["status"] == "assigned"
+    assert body["vehicle"]["registration_number"]
+    assert body["driver"]["name"]
+
+    # Same vehicle overlapping window on another trip -> 409
+    conflict = client.post("/api/ops/transport", json={
+        "trip_id": trip_b, "vehicle_id": vehicle_id,
+        "origin": "Delhi", "destination": "Shimla",
+        "pickup_at": "2026-11-01T12:00:00", "dropoff_at": "2026-11-01T20:00:00"})
+    assert conflict.status_code == 409
+
+    # Same driver overlapping window -> 409
+    vehicles = client.get("/api/ops/vehicles").json()
+    other_vehicle = next(v["id"] for v in vehicles if v["id"] != vehicle_id)
+    driver_conflict = client.post("/api/ops/transport", json={
+        "trip_id": trip_b, "vehicle_id": other_vehicle, "driver_id": driver_id,
+        "pickup_at": "2026-11-01T12:00:00", "dropoff_at": "2026-11-01T20:00:00"})
+    assert driver_conflict.status_code == 409
+
+    # Non-overlapping window on another trip is fine
+    ok = client.post("/api/ops/transport", json={
+        "trip_id": trip_b, "vehicle_id": vehicle_id, "driver_id": driver_id,
+        "pickup_at": "2026-11-03T09:00:00", "dropoff_at": "2026-11-03T18:00:00"})
+    assert ok.status_code == 201
+
+    # Unknown vehicle/driver -> 404
+    assert client.post("/api/ops/transport", json={
+        "trip_id": "ops-trip-x", "vehicle_id": "no-such-vehicle"}).status_code == 404
+    assert client.post("/api/ops/transport", json={
+        "trip_id": "ops-trip-x", "driver_id": "no-such-driver"}).status_code == 404
+
+    # Bad window ordering -> 422
+    assert client.post("/api/ops/transport", json={
+        "trip_id": "ops-trip-x", "pickup_at": "2026-11-05T10:00:00",
+        "dropoff_at": "2026-11-05T09:00:00"}).status_code == 422
+
+    # Timing update persists and revalidates windows
+    timing = client.put(f"/api/ops/transport/{trip_b}/timing", json={
+        "pickup_at": "2026-11-04T09:00:00", "dropoff_at": "2026-11-04T18:00:00"})
+    assert timing.status_code == 200
+    assert timing.json()["pickup_at"].startswith("2026-11-04")
+
+    # Lifecycle: assigned -> en_route -> delayed (reason required) -> resolve -> completed
+    assert client.post(f"/api/ops/transport/{trip_a}/status",
+                       json={"to_status": "en_route"}).json()["status"] == "en_route"
+    assert client.post(f"/api/ops/transport/{trip_a}/status",
+                       json={"to_status": "delayed"}).status_code == 422
+    delayed = client.post(f"/api/ops/transport/{trip_a}/status",
+                          json={"to_status": "delayed", "delay_reason": "Landslide on NH-3"})
+    assert delayed.json()["status"] == "delayed"
+    assert "Landslide" in delayed.json()["delay_reason"]
+    resolved = client.post(f"/api/ops/transport/{trip_a}/status",
+                           json={"to_status": "en_route"})
+    assert resolved.json()["status"] == "en_route"
+    assert resolved.json()["delay_reason"] is None
+    completed = client.post(f"/api/ops/transport/{trip_a}/status",
+                            json={"to_status": "completed"})
+    assert completed.json()["status"] == "completed"
+
+    # Terminal state rejects further moves; illegal jumps rejected
+    assert client.post(f"/api/ops/transport/{trip_a}/status",
+                       json={"to_status": "en_route"}).status_code == 422
+    assert client.post(f"/api/ops/transport/{trip_b}/status",
+                       json={"to_status": "completed"}).status_code in (200, 422)
+
+    # Filtered list + single fetch + missing trip
+    delayed_only = client.get("/api/ops/transport", params={"status": "delayed"})
+    assert all(a["status"] == "delayed" for a in delayed_only.json())
+    assert client.get(f"/api/ops/transport/{trip_a}").status_code == 200
+    assert client.get("/api/ops/transport/no-such-trip").status_code == 404
+
+
+def test_ops_traveler_notification_is_persisted():
+    vehicle_id, driver_id = _ops_vehicle_and_driver()
+    trip_id = "ops-trip-notify-001"
+    _ops_approve(trip_id)
+    created = client.post("/api/ops/transport", json={
+        "trip_id": trip_id, "vehicle_id": vehicle_id, "driver_id": driver_id,
+        "origin": "Delhi", "destination": "Manali",
+        "pickup_at": "2026-12-01T09:00:00", "dropoff_at": "2026-12-01T18:00:00"})
+    assert created.status_code == 201
+
+    sent = client.post(f"/api/ops/transport/{trip_id}/notify", json={
+        "event": "vehicle_change", "note": "Upgraded to Innova"})
+    assert sent.status_code == 201
+    body = sent.json()
+    assert "Upgraded to Innova" in body["message"]
+    assert vehicle_id is not None and body["message"].startswith("Your vehicle has changed")
+
+    bad_event = client.post(f"/api/ops/transport/{trip_id}/notify", json={"event": "party"})
+    assert bad_event.status_code == 422
+
+    # Notification persisted in backend database (traveler inbox source of truth)
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Notification
+    db = SessionLocal()
+    try:
+        row = db.query(Notification).filter(Notification.id == body["id"]).first()
+        assert row is not None and row.message == body["message"]
+    finally:
+        db.close()
+
+
+def test_ops_routes_registered_in_openapi():
+    spec = client.get("/openapi.json").json()
+    for path in ("/api/ops/accommodations", "/api/ops/properties",
+                 "/api/ops/vehicles", "/api/ops/drivers", "/api/ops/transport",
+                 "/api/ops/transport/{trip_id}/notify"):
+        assert path in spec["paths"], path
+
+
+def test_ops_console_has_no_hardcoded_operational_data():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    banned = ["Hotel Taj", "Marriott", "TRIP-001", "John Doe", "Driver 1",
+              "Vehicle A", "MH-01-AB-1234"]
+    offenders = []
+    for root, _, files in os.walk(os.path.join(repo, "src", "components", "operator")):
+        for filename in files:
+            if filename.endswith((".ts", ".tsx")) and filename in (
+                    "OperatorHotels.tsx", "OperatorTransport.tsx"):
+                path = os.path.join(root, filename)
+                with open(path, encoding="utf-8") as handle:
+                    content = handle.read()
+                for phrase in banned:
+                    if phrase in content:
+                        offenders.append(f"{filename}: {phrase}")
+                assert "TF FLEET" not in content, f"{filename} still fabricates fleet data"
+                assert "Fleet Chauffeur" not in content, f"{filename} still fabricates drivers"
+                assert "contracted_rooms: 10" not in content, f"{filename} still fabricates rooms"
+    assert offenders == []
+
+
+def test_ops_console_has_no_hardcoded_operational_data():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    banned = ["Hotel Taj", "Marriott", "TRIP-001", "John Doe", "Driver 1",
+              "Vehicle A", "MH-01-AB-1234"]
+    offenders = []
+    for root, _, files in os.walk(os.path.join(repo, "src", "components", "operator")):
+        for filename in files:
+            if filename.endswith((".ts", ".tsx")) and filename in (
+                    "OperatorHotels.tsx", "OperatorTransport.tsx"):
+                path = os.path.join(root, filename)
+                with open(path, encoding="utf-8") as handle:
+                    content = handle.read()
+                for phrase in banned:
+                    if phrase in content:
+                        offenders.append(f"{filename}: {phrase}")
+                assert "TF FLEET" not in content, f"{filename} still fabricates fleet data"
+                assert "Fleet Chauffeur" not in content, f"{filename} still fabricates drivers"
+                assert "contracted_rooms: 10" not in content, f"{filename} still fabricates rooms"
+    assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Operations consoles: activities dispatch (assignments, vendors, capacity)
+# ---------------------------------------------------------------------------
+def _ops_activity_id(title_part="Paragliding"):
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Activity
+    db = SessionLocal()
+    try:
+        activity = db.query(Activity).filter(
+            Activity.title.ilike(f"%{title_part}%"), Activity.is_active == True).first()  # noqa: E712
+        assert activity is not None
+        return activity.id, activity.title, activity.capacity
+    finally:
+        db.close()
+
+
+def _ops_activity_vendor_id():
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Vendor
+    db = SessionLocal()
+    try:
+        vendor = db.query(Vendor).filter(
+            Vendor.vendor_type == "activity", Vendor.is_verified == True).first()  # noqa: E712
+        assert vendor is not None
+        return vendor.id, vendor.name
+    finally:
+        db.close()
+
+
+def _ops_hotel_vendor_id():
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Vendor
+    db = SessionLocal()
+    try:
+        vendor = db.query(Vendor).filter(Vendor.vendor_type == "hotel").first()
+        assert vendor is not None
+        return vendor.id
+    finally:
+        db.close()
+
+
+def test_ops_activity_assignment_lifecycle_and_price():
+    activity_id, title, capacity = _ops_activity_id()
+    vendor_id, _ = _ops_activity_vendor_id()
+    trip_id = "ops-trip-activity-001"
+    _ops_approve(trip_id)
+    _ops_approve("ops-trip-x")
+
+    created = client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id, "vendor_id": vendor_id,
+        "scheduled_date": "2026-11-02", "start_time": "09:00", "end_time": "12:30",
+        "participants": 4})
+    assert created.status_code == 201
+    body = created.json()
+    assert body["status"] == "pending"
+    assert body["activity"]["title"] == title
+    assert body["vendor"]["id"] == vendor_id
+    assert body["price"]["unit_price"] > 0
+    assert body["price"]["total_price"] == pytest.approx(body["price"]["unit_price"] * 4)
+    assert body["remaining_capacity"] == capacity - 4
+    assignment_id = body["id"]
+
+    # Retrieve single + persistence across reads
+    fetched = client.get(f"/api/ops/activities/{assignment_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["trip_id"] == trip_id
+
+    # Confirm requires nothing more here -> confirmed
+    confirmed = client.post(f"/api/ops/activities/{assignment_id}/confirm", json={})
+    assert confirmed.json()["status"] == "confirmed"
+
+    # Update allocation persists
+    updated = client.put(f"/api/ops/activities/{assignment_id}/allocation",
+                         json={"participants": 6})
+    assert updated.json()["participants"] == 6
+    assert updated.json()["price"]["total_price"] == pytest.approx(
+        updated.json()["price"]["unit_price"] * 6)
+
+    # Invalid activity / vendor -> 404
+    assert client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-x", "activity_id": "no-such-activity"}).status_code == 404
+    assert client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-x", "activity_id": activity_id,
+        "vendor_id": "no-such-vendor"}).status_code == 404
+
+    # Hotel-type vendor is not eligible for activities -> 422
+    hotel_vendor = _ops_hotel_vendor_id()
+    bad_pair = client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-x", "activity_id": activity_id, "vendor_id": hotel_vendor})
+    assert bad_pair.status_code == 422
+
+    # Missing trip -> 422
+    assert client.post("/api/ops/activities", json={
+        "trip_id": "  ", "activity_id": activity_id}).status_code == 422
+    assert client.get("/api/ops/activities/no-such-id").status_code == 404
+
+
+def test_ops_activity_capacity_conflicts():
+    activity_id, _, capacity = _ops_activity_id()
+    assert capacity is not None and capacity > 0
+    trip_id = "ops-trip-activity-002"
+    _ops_approve(trip_id)
+
+    over = client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id, "participants": capacity + 5})
+    assert over.status_code == 409
+
+    created = client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id, "participants": 2})
+    assert created.status_code == 201
+    assignment_id = created.json()["id"]
+
+    over_update = client.put(f"/api/ops/activities/{assignment_id}/allocation",
+                             json={"participants": capacity + 1})
+    assert over_update.status_code == 409
+
+    exact = client.put(f"/api/ops/activities/{assignment_id}/allocation",
+                       json={"participants": capacity})
+    assert exact.json()["participants"] == capacity
+    assert exact.json()["remaining_capacity"] == 0
+
+
+def test_ops_activity_schedule_conflicts_and_trip_dates():
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Trip
+    db = SessionLocal()
+    try:
+        trip = db.query(Trip).first()
+        assert trip is not None
+        trip_id, start, end = trip.id, trip.start_date, trip.end_date
+    finally:
+        db.close()
+    _ops_approve("ops-trip-activity-003")
+    _ops_approve("ops-trip-activity-004")
+    _ops_approve(trip_id)
+
+    activity_id, _, _ = _ops_activity_id()
+    vendor_id, _ = _ops_activity_vendor_id()
+
+    first = client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-activity-003", "activity_id": activity_id,
+        "vendor_id": vendor_id, "scheduled_date": "2026-11-05",
+        "start_time": "09:00", "end_time": "11:00", "participants": 2})
+    assert first.status_code == 201
+
+    # Overlapping activity on same trip -> 409
+    overlap = client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-activity-003", "activity_id": activity_id,
+        "scheduled_date": "2026-11-05", "start_time": "10:30", "end_time": "12:00"})
+    assert overlap.status_code == 409
+
+    # Same vendor overlapping on another trip -> 409
+    vendor_overlap = client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-activity-004", "activity_id": activity_id,
+        "vendor_id": vendor_id, "scheduled_date": "2026-11-05",
+        "start_time": "10:00", "end_time": "12:00"})
+    assert vendor_overlap.status_code == 409
+
+    # Adjacent (touching) window is fine
+    adjacent = client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-activity-003", "activity_id": activity_id,
+        "scheduled_date": "2026-11-05", "start_time": "11:00", "end_time": "12:00"})
+    assert adjacent.status_code == 201
+
+    # End before start -> 422
+    assert client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-activity-003", "activity_id": activity_id,
+        "scheduled_date": "2026-11-05", "start_time": "14:00",
+        "end_time": "12:00"}).status_code == 422
+
+    # Outside the backend trip window -> 422 (when trip exists with dates)
+    if start and end:
+        outside = client.post("/api/ops/activities", json={
+            "trip_id": trip_id, "activity_id": activity_id, "scheduled_date": "2001-01-01"})
+        assert outside.status_code == 422
+
+
+def test_ops_activity_status_confirm_flag_resolve():
+    activity_id, _, _ = _ops_activity_id()
+    vendor_id, _ = _ops_activity_vendor_id()
+    trip_id = "ops-trip-activity-005"
+    _ops_approve(trip_id)
+
+    # Incomplete (no vendor/schedule) cannot confirm -> 422
+    bare = client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id})
+    assert bare.status_code == 201
+    assignment_id = bare.json()["id"]
+    assert client.post(f"/api/ops/activities/{assignment_id}/confirm", json={}).status_code == 422
+
+    # Complete it, then confirm
+    filled = client.put(f"/api/ops/activities/{assignment_id}", json={
+        "vendor_id": vendor_id, "scheduled_date": "2026-11-06",
+        "start_time": "09:00", "end_time": "11:00", "participants": 2})
+    assert filled.status_code == 200
+    assert client.post(f"/api/ops/activities/{assignment_id}/confirm", json={}).json()["status"] == "confirmed"
+
+    # Flag and resolve
+    flagged = client.post(f"/api/ops/activities/{assignment_id}/flag-issue",
+                          json={"reason": "Guide called in sick"})
+    assert flagged.json()["status"] == "issue"
+    resolved = client.post(f"/api/ops/activities/{assignment_id}/resolve-issue", json={})
+    assert resolved.json()["status"] == "confirmed"
+
+    # Filtered lists reflect backend statuses
+    for status in ("pending", "confirmed", "issue"):
+        listed = client.get("/api/ops/activities", params={"status": status})
+        assert all(a["status"] == status for a in listed.json())
+
+
+def test_ops_vendor_activity_relationships_both_directions():
+    activity_id, title, _ = _ops_activity_id()
+    vendor_id, vendor_name = _ops_activity_vendor_id()
+
+    eligible = client.get(f"/api/ops/activity-inventory/{activity_id}/vendors")
+    assert eligible.status_code == 200
+    assert eligible.json()["activity"]["title"] == title
+    assert vendor_id in [v["id"] for v in eligible.json()["vendors"]]
+    assert all(v["is_verified"] for v in eligible.json()["vendors"])
+
+    trip_id = "ops-trip-activity-006"
+    _ops_approve(trip_id)
+    created = client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id, "vendor_id": vendor_id,
+        "scheduled_date": "2026-11-07", "start_time": "09:00", "participants": 2})
+    assert created.status_code == 201
+
+    detail = client.get(f"/api/ops/vendors/{vendor_id}/assignments")
+    assert detail.status_code == 200
+    assert detail.json()["vendor"]["name"] == vendor_name
+    assert trip_id in detail.json()["assigned_trip_ids"]
+    assert trip_id in [a["trip_id"] for a in detail.json()["assignments"]]
+
+    by_vendor = client.get("/api/ops/activities", params={"vendor_id": vendor_id})
+    assert all(a["vendor_id"] == vendor_id for a in by_vendor.json())
+    by_trip = client.get("/api/ops/activities", params={"trip_id": trip_id})
+    assert all(a["trip_id"] == trip_id for a in by_trip.json())
+    assert client.get("/api/ops/vendors/no-such-vendor/assignments").status_code == 404
+
+
+def test_ops_vendor_onboarding_and_verify():
+    created = client.post("/api/ops/vendors", json={
+        "name": "Ops Test Outfitters", "vendor_type": "activity",
+        "contact_email": "ops@test-outfitters.example", "phone": "+91 90000 00002"})
+    assert created.status_code == 201
+    vendor_id = created.json()["id"]
+    assert created.json()["is_verified"] is True
+
+    inventory = client.get("/api/ops/vendors").json()
+    assert vendor_id in [v["id"] for v in inventory]
+
+    suspended = client.post(f"/api/ops/vendors/{vendor_id}/verify", json={"is_verified": False})
+    assert suspended.json()["is_verified"] is False
+
+    activity_id, _, _ = _ops_activity_id()
+    _ops_approve("ops-trip-activity-007")
+    rejected = client.post("/api/ops/activities", json={
+        "trip_id": "ops-trip-activity-007", "activity_id": activity_id, "vendor_id": vendor_id})
+    assert rejected.status_code == 422
+
+    assert client.post("/api/ops/vendors", json={"name": "  "}).status_code == 422
+
+    activity_list = client.get("/api/ops/activity-inventory").json()
+    assert len(activity_list) > 0
+    assert all(a["title"] for a in activity_list)
+
+
+def test_ops_activity_routes_registered_in_openapi():
+    spec = client.get("/openapi.json").json()
+    for path in ("/api/ops/activities", "/api/ops/vendors",
+                 "/api/ops/vendors/{vendor_id}/assignments",
+                 "/api/ops/activity-inventory/{activity_id}/vendors"):
+        assert path in spec["paths"], path
+
+
+def test_ops_activity_console_has_no_hardcoded_operational_data():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    banned = ["TRIP-001", "TRIP-002", "Vendor A", "Vendor B", "Activity 1",
+              "Activity 2", "John Doe", "+91 9999999999", "fake@example.com"]
+    path = os.path.join(repo, "src", "components", "operator", "OperatorVendors.tsx")
+    with open(path, encoding="utf-8") as handle:
+        content = handle.read()
+    offenders = [phrase for phrase in banned if phrase in content]
+    assert offenders == []
+    assert "activities[0]" not in content
+    assert "vendors[1]" not in content
+
+
+# ---------------------------------------------------------------------------
+# Operator approval pipeline (approve -> accept -> finalize, gated + locked)
+# ---------------------------------------------------------------------------
+def test_ops_pipeline_gates_assignments_before_approval():
+    hotel_id, _ = _ops_hotel_id()
+    vehicle_id, driver_id = _ops_vehicle_and_driver()
+    activity_id, _, _ = _ops_activity_id()
+    trip_id = "ops-pipe-gated-001"
+
+    assert client.post("/api/ops/accommodations", json={
+        "trip_id": trip_id, "hotel_id": hotel_id, "rooms": 1}).status_code == 409
+    assert client.post("/api/ops/transport", json={
+        "trip_id": trip_id, "vehicle_id": vehicle_id}).status_code == 409
+    assert client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id}).status_code == 409
+
+    pipeline = client.get(f"/api/ops/trips/{trip_id}/pipeline").json()
+    assert pipeline["approval"]["approved"] is False
+    assert pipeline["progress"] == {"assigned": 0, "total": 3}
+
+    # Approve is idempotent
+    assert client.post(f"/api/ops/trips/{trip_id}/approve", json={}).status_code == 200
+    assert client.post(f"/api/ops/trips/{trip_id}/approve", json={}).status_code == 200
+
+    # Accept requires approval too
+    assert client.post("/api/ops/trips/never-approved-trip/accept", json={}).status_code == 409
+    accepted = client.post(f"/api/ops/trips/{trip_id}/accept", json={})
+    assert accepted.json()["assignment_started"] is True
+
+
+def test_ops_pipeline_finalize_validation_lock_and_idempotency():
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Notification
+
+    hotel_id, _ = _ops_hotel_id()
+    vehicle_id, driver_id = _ops_vehicle_and_driver()
+    activity_id, _, _ = _ops_activity_id()
+    vendor_id, _ = _ops_activity_vendor_id()
+    trip_id = "ops-pipe-final-001"
+    _ops_approve(trip_id)
+    client.post(f"/api/ops/trips/{trip_id}/accept", json={})
+
+    # Incomplete (nothing attached) -> 422 with missing list
+    blocked = client.post(f"/api/ops/trips/{trip_id}/finalize", json={})
+    assert blocked.status_code == 422
+    assert "hotel" in blocked.json()["detail"]
+
+    client.post("/api/ops/accommodations", json={
+        "trip_id": trip_id, "hotel_id": hotel_id, "rooms": 1,
+        "check_in_date": "2026-12-10", "check_out_date": "2026-12-12"})
+    client.post("/api/ops/transport", json={
+        "trip_id": trip_id, "vehicle_id": vehicle_id, "driver_id": driver_id,
+        "origin": "Delhi", "destination": "Manali",
+        "pickup_at": "2026-12-10T09:00:00", "dropoff_at": "2026-12-10T18:00:00"})
+    created = client.post("/api/ops/activities", json={
+        "trip_id": trip_id, "activity_id": activity_id, "vendor_id": vendor_id,
+        "scheduled_date": "2026-12-11", "start_time": "09:00",
+        "end_time": "11:00", "participants": 2})
+    client.post(f"/api/ops/activities/{created.json()['id']}/confirm", json={})
+
+    finalized = client.post(f"/api/ops/trips/{trip_id}/finalize", json={})
+    assert finalized.status_code == 200
+    body = finalized.json()
+    assert body["finalized"] is True
+    assert body["traveler_notified"] is True
+    assert len(body["partners"]) >= 1
+
+    pipeline = client.get(f"/api/ops/trips/{trip_id}/pipeline").json()
+    assert pipeline["approval"]["finalized"] is True
+    assert pipeline["progress"] == {"assigned": 3, "total": 3}
+
+    # Locked: every mutation rejected
+    assert client.put(f"/api/ops/accommodations/{trip_id}/rooms",
+                      json={"rooms": 3}).status_code == 409
+    assert client.post(f"/api/ops/transport/{trip_id}/status",
+                       json={"to_status": "completed"}).status_code == 409
+    assert client.put(f"/api/ops/activities/{created.json()['id']}/allocation",
+                      json={"participants": 3}).status_code == 409
+
+    # Idempotent re-finalize: no duplicate notifications
+    db = SessionLocal()
+    try:
+        before = db.query(Notification).filter(
+            Notification.title == "Trip Finalized").count()
+    finally:
+        db.close()
+    again = client.post(f"/api/ops/trips/{trip_id}/finalize", json={})
+    assert again.status_code == 200
+    assert again.json()["traveler_notified"] is False
+    db = SessionLocal()
+    try:
+        after = db.query(Notification).filter(
+            Notification.title == "Trip Finalized").count()
+        assert after == before
+    finally:
+        db.close()
+
+    approvals = client.get("/api/ops/approvals").json()
+    assert trip_id in [a["trip_id"] for a in approvals]
+
+
+def test_ops_pipeline_routes_registered_in_openapi():
+    spec = client.get("/openapi.json").json()
+    for path in ("/api/ops/trips/{trip_id}/approve", "/api/ops/trips/{trip_id}/accept",
+                 "/api/ops/trips/{trip_id}/pipeline", "/api/ops/trips/{trip_id}/finalize",
+                 "/api/ops/approvals"):
+        assert path in spec["paths"], path
+
+
+# ---------------------------------------------------------------------------
+# Traveler trip confirmation (planning -> confirmed, idempotent, owned)
+# ---------------------------------------------------------------------------
+def _confirm_trip_payload(destination="Manali"):
+    return {
+        "title": "Confirm Drill Trip",
+        "destination_name": destination,
+        "duration_days": 3,
+        "total_budget": 60000.0,
+        "traveler_count": 2,
+        "currency": "INR",
+        "start_date": "2026-11-01T09:00:00",
+        "end_date": "2026-11-03T18:00:00",
+    }
+
+
+def test_trip_confirm_happy_path_persists_and_notifies():
+    from backend.database.connection import SessionLocal
+    from backend.models.models import ChangeHistory, Notification
+
+    created = client.post("/api/trips", json=_confirm_trip_payload())
+    assert created.status_code == 200
+    trip_id = created.json()["id"]
+    owner = created.json()["user_id"]
+    itinerary_count = len(created.json()["itinerary"])
+    assert itinerary_count > 0
+
+    confirmed = client.post(f"/api/trips/{trip_id}/confirm", json={"user_id": owner})
+    assert confirmed.status_code == 200
+    body = confirmed.json()
+    assert body["status"] == "success"
+    assert body["already_confirmed"] is False
+    assert body["confirmed_at"] is not None
+    assert body["trip"]["status"] == "confirmed"
+    assert body["trip"]["id"] == trip_id
+
+    # Operator visibility: confirmed trip listed by status filter
+    listed = client.get("/api/trips", params={"status": "confirmed"})
+    assert trip_id in [t["id"] for t in listed.json()]
+
+    # History + notification persisted exactly once
+    db = SessionLocal()
+    try:
+        history = db.query(ChangeHistory).filter(
+            ChangeHistory.trip_id == trip_id, ChangeHistory.action == "trip_confirmed").all()
+        assert len(history) == 1
+        notes = db.query(Notification).filter(
+            Notification.trip_id == trip_id, Notification.title == "Trip Confirmed").all()
+        assert len(notes) == 1
+        assert trip_id in notes[0].message
+    finally:
+        db.close()
+
+    # Idempotent reconfirm: same state, no duplicates
+    again = client.post(f"/api/trips/{trip_id}/confirm", json={"user_id": owner})
+    assert again.status_code == 200
+    assert again.json()["already_confirmed"] is True
+    db = SessionLocal()
+    try:
+        assert db.query(ChangeHistory).filter(
+            ChangeHistory.trip_id == trip_id, ChangeHistory.action == "trip_confirmed").count() == 1
+        assert db.query(Notification).filter(
+            Notification.trip_id == trip_id, Notification.title == "Trip Confirmed").count() == 1
+    finally:
+        db.close()
+
+    # No ops assignments fabricated by confirmation
+    assert client.get("/api/ops/accommodations/no-such-trip-xyz").status_code == 404
+    assert client.get("/api/ops/transport/no-such-trip-xyz").status_code == 404
+
+
+def test_trip_confirm_rejects_bad_requests():
+    created = client.post("/api/trips", json=_confirm_trip_payload())
+    trip_id = created.json()["id"]
+    owner = created.json()["user_id"]
+
+    assert client.post("/api/trips/no-such-trip/confirm", json={"user_id": owner}).status_code == 404
+    assert client.post(f"/api/trips/{trip_id}/confirm", json={"user_id": "usr-someone-else"}).status_code == 403
+
+    # Non-confirmable status
+    client.put(f"/api/trips/{trip_id}", json={"status": "cancelled"})
+    assert client.post(f"/api/trips/{trip_id}/confirm", json={"user_id": owner}).status_code == 422
+
+    # Missing dates cannot confirm
+    nodates = client.post("/api/trips", json={
+        "title": "Dateless", "destination_name": "Manali",
+        "duration_days": 2, "total_budget": 10000.0, "traveler_count": 1})
+    assert nodates.status_code == 200
+    assert client.post(f"/api/trips/{nodates.json()['id']}/confirm",
+                       json={"user_id": nodates.json()["user_id"]}).status_code == 422
+
+
+def test_trip_confirm_route_registered_in_openapi():
+    spec = client.get("/openapi.json").json()
+    assert "/api/trips/{trip_id}/confirm" in spec["paths"]
+
+
 # ---------------------------------------------------------------------------
 # Location-aware restaurant ranking (no provider calls; pure ranking logic)
 # ---------------------------------------------------------------------------

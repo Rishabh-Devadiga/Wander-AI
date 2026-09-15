@@ -5,7 +5,7 @@ from backend.database.connection import SessionLocal, engine, Base
 from backend.models.models import (
     User, TravelerProfile, Destination, Vendor, Hotel, Activity,
     TransportOption, Trip, TripPreference, ItineraryItem, Booking,
-    Notification, Alert, ChangeHistory, Review
+    Notification, Alert, ChangeHistory, Review, Vehicle, Driver
 )
 
 logger = logging.getLogger("tourflow_seed")
@@ -269,6 +269,7 @@ def run_seed():
             currency="INR",
             difficulty_level="moderate",
             rating=4.9,
+            capacity=12,
             images=["https://images.unsplash.com/photo-1506012787146-f92b2d7d6d96?auto=format&fit=crop&w=800&q=80"],
             description="Tandem flight over cedar canopies with certified instructors, followed by a rugged quad bike excursion along alpine streams.",
             meeting_point="Solang Adventure Base Camp"
@@ -285,6 +286,7 @@ def run_seed():
             currency="INR",
             difficulty_level="moderate",
             rating=4.8,
+            capacity=30,
             images=["https://images.unsplash.com/photo-1517824806704-9040b037703b?auto=format&fit=crop&w=800&q=80"],
             description="Journey through the engineering marvel of Atal Tunnel into Lahaul Valley and ascend to Rohtang Pass (3,978m) for pristine snow landscapes.",
             meeting_point="TourFlow Private Lounge, Manali Mall Road"
@@ -301,6 +303,7 @@ def run_seed():
             currency="INR",
             difficulty_level="easy",
             rating=4.7,
+            capacity=20,
             images=["https://images.unsplash.com/photo-1432821596592-e2c18b78144f?auto=format&fit=crop&w=800&q=80"],
             description="Tranquil guided forest trail passing ancient apple orchards to the cascading Jogini falls, culminating in ancient hot spring baths.",
             meeting_point="Vashisht Temple Square"
@@ -317,6 +320,7 @@ def run_seed():
             currency="INR",
             difficulty_level="easy",
             rating=4.8,
+            capacity=25,
             images=["https://images.unsplash.com/photo-1554118811-1e0d58224f24?auto=format&fit=crop&w=800&q=80"],
             description="Curated insider walk discovering woodcraft master studios, hidden rooftop cider cafés, and local live acoustic folklore.",
             meeting_point="Old Manali Bridge Gate"
@@ -333,6 +337,7 @@ def run_seed():
             currency="INR",
             difficulty_level="challenging",
             rating=4.8,
+            capacity=16,
             images=["https://images.unsplash.com/photo-1530866495561-507c9faab2ed?auto=format&fit=crop&w=800&q=80"],
             description="Adrenaline-pumping 14km rafting course through glacier-fed rapids in the Kullu-Manali stretch with safety kayaks.",
             meeting_point="Pirdi Rafting Point"
@@ -578,6 +583,28 @@ def run_seed():
             ai_planning_rating=5.0
         )
         db.add(demo_review)
+
+        # ----------------------------------------------------
+        # 4. Dispatch Fleet Inventory (vehicles & drivers)
+        # ----------------------------------------------------
+        if not db.query(Vehicle).first():
+            db.add_all([
+                Vehicle(id="veh-001", name="Mahindra Thar 4x4", registration_number="HP01-TRAN-1001",
+                        vehicle_type="private_cab", capacity=4, is_active=True),
+                Vehicle(id="veh-002", name="Toyota Innova Crysta", registration_number="HP01-TRAN-1002",
+                        vehicle_type="private_cab", capacity=6, is_active=True),
+                Vehicle(id="veh-003", name="Volvo 9400 Coach", registration_number="HP01-TRAN-2001",
+                        vehicle_type="volvo_bus", capacity=40, is_active=True),
+            ])
+        if not db.query(Driver).first():
+            db.add_all([
+                Driver(id="drv-001", name="Tenzin Norbu", phone="+91 98160 10001",
+                       license_number="HP-DL-20180001", is_active=True),
+                Driver(id="drv-002", name="Amit Thakur", phone="+91 98160 10002",
+                       license_number="HP-DL-20190002", is_active=True),
+                Driver(id="drv-003", name="Rajesh Kumar", phone="+91 98160 10003",
+                       license_number="HP-DL-20200003", is_active=True),
+            ])
 
         db.commit()
         logger.info("Deterministic database seed completed successfully!")

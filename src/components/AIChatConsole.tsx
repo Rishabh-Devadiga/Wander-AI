@@ -15,6 +15,7 @@ import { Trip, Destination, TripPreference, ItineraryItem, TransportBookingOptio
 import { SmartImage } from './SmartImage';
 import { TripInteractiveMap } from './TripInteractiveMap';
 import { PossibleOptionsTray } from './PossibleOptionsTray';
+import { TripConfirmPanel } from './TripConfirmPanel';
 import { getDestinationPhotos, getActivityPhoto, DESTINATION_PHOTO_CATALOG } from '../utils/imageCatalog';
 import { isInvalidDestination, parseBudget, parseDateRange } from '../utils/validation';
 import { exportTripToPDF } from '../utils/pdfExport';
@@ -2461,6 +2462,12 @@ You can select any option or lock it in via AI Guide or direct self-booking!`,
                         setSwapActivityModal({ isOpen: true, item: firstItem });
                       }
                     }}
+                  />
+
+                  {/* Traveler Review & Confirm (same confirmation flow) */}
+                  <TripConfirmPanel
+                    trip={generatedTrip}
+                    onConfirmed={(updated) => setGeneratedTrip(updated)}
                   />
                 </div>
               )}

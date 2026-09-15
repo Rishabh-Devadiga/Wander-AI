@@ -367,6 +367,223 @@ export interface Review {
   created_at: string;
 }
 
+// Operations consoles: all rows come from backend inventory/assignment APIs.
+export type AccommodationStatus = 'pending' | 'assigned' | 'issue';
+export type TransportStatus = 'pending' | 'assigned' | 'en_route' | 'completed' | 'delayed';
+
+export interface OpsHotelMini {
+  id: string;
+  name: string;
+  address?: string | null;
+  rating: number;
+  category: string;
+  price_per_night: number;
+  currency: string;
+  is_active: boolean;
+  destination_id: string;
+}
+
+export interface AccommodationAssignment {
+  id: string;
+  trip_id: string;
+  hotel_id?: string | null;
+  hotel?: OpsHotelMini | null;
+  rooms?: number | null;
+  room_type?: string | null;
+  check_in_date?: string | null;
+  check_out_date?: string | null;
+  status: AccommodationStatus;
+  issue_reason?: string | null;
+  updated_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface OpsProperty {
+  id: string;
+  name: string;
+  address?: string | null;
+  category: string;
+  rating: number;
+  price_per_night: number;
+  currency: string;
+  is_active: boolean;
+  destination_id: string;
+  destination_name?: string | null;
+  assigned_trip_ids: string[];
+  assigned_trip_count: number;
+}
+
+export interface Vehicle {
+  id: string;
+  name: string;
+  registration_number: string;
+  vehicle_type: string;
+  capacity: number;
+  is_active: boolean;
+  created_at?: string | null;
+}
+
+export interface Driver {
+  id: string;
+  name: string;
+  phone?: string | null;
+  license_number?: string | null;
+  is_active: boolean;
+  created_at?: string | null;
+}
+
+export interface TransportAssignment {
+  id: string;
+  trip_id: string;
+  vehicle_id?: string | null;
+  vehicle?: Vehicle | null;
+  driver_id?: string | null;
+  driver?: Driver | null;
+  origin?: string | null;
+  destination?: string | null;
+  pickup_at?: string | null;
+  dropoff_at?: string | null;
+  status: TransportStatus;
+  pre_delay_status?: string | null;
+  delay_reason?: string | null;
+  updated_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TravelerNotification {
+  id: string;
+  trip_id: string;
+  user_id: string;
+  title: string;
+  message: string;
+  type: string;
+  created_at?: string | null;
+}
+
+// Activities & Vendors console: rows come from backend assignment APIs.
+export type ActivityAssignmentStatus = 'pending' | 'confirmed' | 'issue';
+
+export interface OpsActivityMini {
+  id: string;
+  title: string;
+  category: string;
+  duration_hours: number;
+  rating: number;
+  capacity?: number | null;
+  currency: string;
+  destination_id: string;
+  is_active: boolean;
+}
+
+export interface OpsVendorMini {
+  id: string;
+  name: string;
+  vendor_type: string;
+  phone?: string | null;
+  contact_email?: string | null;
+  rating: number;
+  is_verified: boolean;
+}
+
+export interface ActivityPrice {
+  unit_price: number;
+  currency: string;
+  participants?: number | null;
+  total_price?: number | null;
+}
+
+export interface ActivityAssignment {
+  id: string;
+  trip_id: string;
+  activity_id: string;
+  activity?: OpsActivityMini | null;
+  vendor_id?: string | null;
+  vendor?: OpsVendorMini | null;
+  scheduled_date?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  participants?: number | null;
+  remaining_capacity?: number | null;
+  price?: ActivityPrice | null;
+  status: ActivityAssignmentStatus;
+  issue_reason?: string | null;
+  updated_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface OpsVendorDetail {
+  vendor: OpsVendorMini;
+  assignments: ActivityAssignment[];
+  assigned_trip_ids: string[];
+  assigned_trip_count: number;
+}
+
+export interface TripApprovalState {
+  trip_id: string;
+  approved: boolean;
+  approved_at?: string | null;
+  approved_by?: string | null;
+  assignment_started: boolean;
+  assignment_started_at?: string | null;
+  finalized: boolean;
+  finalized_at?: string | null;
+  finalized_by?: string | null;
+}
+
+export interface OpsServiceState {
+  assigned: boolean;
+  status: string;
+  assignment_id?: string | null;
+}
+
+export interface OpsActivitiesState {
+  assigned_count: number;
+  total_count: number;
+  assigned: boolean;
+}
+
+export interface TripPipeline {
+  trip_id: string;
+  approval: TripApprovalState;
+  services: {
+    hotel: OpsServiceState;
+    transport: OpsServiceState;
+    activities: OpsActivitiesState;
+  };
+  progress: { assigned: number; total: number };
+}
+
+export interface TripFinalizeResult {
+  trip_id: string;
+  finalized: boolean;
+  finalized_at?: string | null;
+  services: TripPipeline['services'];
+  traveler_notified: boolean;
+  partners: Array<{ vendor_id: string; name: string; vendor_type: string; phone?: string | null; contact_email?: string | null }>;
+}
+
+export interface OpsVendorRow extends OpsVendorMini {
+  assigned_trip_ids: string[];
+  assigned_trip_count: number;
+}
+
+export interface OpsActivityInventoryItem {
+  id: string;
+  title: string;
+  category: string;
+  duration_hours: number;
+  price_per_person: number;
+  currency: string;
+  rating: number;
+  capacity?: number | null;
+  destination_id: string;
+  destination_name?: string | null;
+  is_active: boolean;
+}
+
 export interface Trip {
   id: string;
   user_id: string;
@@ -403,6 +620,8 @@ export interface Trip {
   reviews: Review[];
   packing_items?: Array<{ id: string; category: string; text: string; checked: boolean }>;
   expenses?: Array<{ id: string; title: string; amount: number; paidBy: string }>;
+  confirmed_at?: string | null;
+  confirmed_by?: string | null;
 }
 
 export interface HealthStatus {

@@ -25,6 +25,7 @@ export type OperatorNavTab =
   | 'hotels'
   | 'transport'
   | 'vendors' 
+  | 'assignment_center'
   | 'alerts' 
   | 'ai_assistant'
   | 'analytics';
@@ -88,6 +89,11 @@ export const OperatorSidebar: React.FC<OperatorSidebarProps> = ({
       id: 'vendors' as OperatorNavTab,
       label: 'Activities & Vendors',
       icon: Compass,
+    },
+    {
+      id: 'assignment_center' as OperatorNavTab,
+      label: 'Assignment Center',
+      icon: Layers,
     },
     {
       id: 'alerts' as OperatorNavTab,
