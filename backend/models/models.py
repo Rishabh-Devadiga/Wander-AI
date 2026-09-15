@@ -18,6 +18,9 @@ class User(Base):
     phone = Column(String(50), nullable=True)
     role = Column(String(50), default="traveler")  # traveler, operator, admin
     is_active = Column(Boolean, default=True)
+    # bcrypt hash for traveler password login. Null for legacy/seeded rows
+    # and operator accounts authenticated by other means.
+    password_hash = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -207,6 +210,10 @@ class Trip(Base):
     traveler_count = Column(Integer, default=2)
     pace = Column(String(50), default="balanced")  # relaxed, balanced, packed
     discovery_session_id = Column(String(64), nullable=True, index=True)
+    # Full Express canonical trip object (JSON) for traveler-owned persistence.
+    # The Express engine remains the itinerary generator; this snapshot is the
+    # durable source of truth backing "My Trips" restore.
+    canonical_snapshot = Column(JSON, nullable=True)
     # Traveler confirmation (planning -> confirmed). Set once by the confirm
     # endpoint; repeated confirms are idempotent and never duplicate rows.
     confirmed_at = Column(DateTime, nullable=True)

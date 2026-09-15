@@ -7,6 +7,8 @@ import DestinationExplorer from './components/DestinationExplorer';
 import CatalogueExplorer from './components/CatalogueExplorer';
 import AIChatConsole from './components/AIChatConsole';
 import CreateTripModal from './components/CreateTripModal';
+import TravelerAuthModal from './components/TravelerAuthModal';
+import { useTravelerAuth } from './store/useTravelerAuth';
 import DynamicBackground, { BACKGROUND_SCENES } from './components/DynamicBackground';
 import { OperatorPortal } from './components/operator/OperatorPortal';
 import { Destination, Trip } from './types/tourflow';
@@ -55,6 +57,8 @@ export default function App() {
 
   useEffect(() => {
     loadDestinations();
+    // Restore the traveler session (token in localStorage, verified server-side).
+    useTravelerAuth.getState().boot();
   }, []);
 
   const loadDestinations = async () => {
@@ -268,6 +272,9 @@ export default function App() {
           onTripCreatedOrUpdated={handleTripCreatedOrUpdated}
           onStartChatWithTripPayload={handleStartChatWithPayload}
         />
+
+        {/* Traveler sign-in / sign-up */}
+        <TravelerAuthModal />
 
       </div>
     </DynamicBackground>

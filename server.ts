@@ -1502,6 +1502,29 @@ function getFastApiBase(): string {
   return 'http://localhost:8000';
 }
 
+// Resolve the authenticated traveler via FastAPI (single source of truth for
+// auth). Returns the verified user id, or null for anonymous/invalid sessions.
+// Trip creation never fails because of auth: anonymous flow is preserved.
+async function resolveTravelerUserId(req: Request): Promise<string | null> {
+  try {
+    const header = req.headers.authorization || '';
+    const [scheme, token] = header.split(' ');
+    if (scheme.toLowerCase() !== 'bearer' || !token) return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(`${getFastApiBase()}/api/auth/traveler/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    return typeof body?.id === 'string' && body.id ? body.id : null;
+  } catch (err) {
+    return null;
+  }
+}
+
 async function fetchLiveTripEnrichment(params: {
   destination: string; checkIn: string; checkOut: string; travelers: number; currency: string;
 }): Promise<{ hotels: any[]; places: any[]; restaurants: any[] }> {
@@ -2555,6 +2578,12 @@ app.post('/api/trips', async (req: Request, res: Response) => {
 
   tripsStore.unshift(newTrip);
   tripsVersion = Date.now();
+  // Associate authenticated travelers' trips with their verified user id.
+  // Anonymous creation is unchanged when no (or an invalid) session exists.
+  const travelerUserId = await resolveTravelerUserId(req);
+  if (travelerUserId) {
+    newTrip.user_id = travelerUserId;
+  }
   res.status(201).json(newTrip);
 });
 
@@ -2590,10 +2619,27 @@ app.get('/api/trips/:id', (req: Request, res: Response) => {
     t.id === idParam || 
     (idParam === '1024' && (t.id === '1024' || t.id === 'trp-manali-1024' || t.id === 'trp-manali-alpine-demo-001')) ||
     (idParam === 'trp-manali-1024' && (t.id === '1024' || t.id === 'trp-manali-1024' || t.id === 'trp-manali-alpine-demo-001')) ||
-    (idParam === 'trp-manali-alpine-demo-001' && (t.id === '1024' || t.id === 'trp-manali-alpine-demo-001'))
+    (idParam === 'trp-manali-alpine-demo-001' && (t.id === '1024' || t.id === 'trp-manali-1024' || t.id === 'trp-manali-alpine-demo-001'))
   );
   if (!trip) return res.status(404).json({ detail: 'Trip not found' });
   res.json(trip);
+});
+
+// Rehydrate the in-memory engine from a persisted canonical snapshot (used
+// when opening a "My Trips" entry). Upserts by id; never regenerates.
+app.post('/api/trips/restore', (req: Request, res: Response) => {
+  const trip = req.body?.trip;
+  if (!trip || typeof trip !== 'object' || typeof trip.id !== 'string' || !trip.id.trim()) {
+    return res.status(422).json({ detail: 'trip object with a valid id is required' });
+  }
+  const idx = tripsStore.findIndex((t) => t.id === trip.id);
+  if (idx >= 0) {
+    tripsStore[idx] = trip;
+  } else {
+    tripsStore.unshift(trip);
+  }
+  tripsVersion = Date.now();
+  res.status(200).json(trip);
 });
 
 app.put('/api/trips/:id', (req: Request, res: Response) => {
@@ -4702,6 +4748,12 @@ const OPS_PROXY_ROUTES: Array<{ method: 'get' | 'post' | 'put'; path: string }> 
   { method: 'get', path: '/api/ops/messages/overview' },
   { method: 'get', path: '/api/ops/trips/:tripId/messages' },
   { method: 'post', path: '/api/ops/trips/:tripId/messages' },
+  { method: 'post', path: '/api/auth/traveler/signup' },
+  { method: 'post', path: '/api/auth/traveler/login' },
+  { method: 'get', path: '/api/auth/traveler/me' },
+  { method: 'get', path: '/api/traveler/trips' },
+  { method: 'post', path: '/api/traveler/trips' },
+  { method: 'get', path: '/api/traveler/trips/:tripId' },
 ];
 
 for (const route of OPS_PROXY_ROUTES) {
@@ -4714,6 +4766,12 @@ for (const route of OPS_PROXY_ROUTES) {
         method: req.method,
         headers: { 'Content-Type': 'application/json' },
       };
+      // Forward the caller's own session token so FastAPI can authenticate
+      // traveler-scoped routes; nothing else is forwarded or logged.
+      const authorization = req.headers.authorization;
+      if (typeof authorization === 'string' && authorization) {
+        (init.headers as Record<string, string>).Authorization = authorization;
+      }
       if (req.method !== 'GET' && req.body !== undefined) {
         init.body = JSON.stringify(req.body);
       }

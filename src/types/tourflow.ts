@@ -693,3 +693,32 @@ export interface TripMessageOverviewEntry {
   urgent_count: number;
   latest_at?: string | null;
 }
+
+export interface TravelerUser {
+  id: string;
+  email: string;
+  full_name: string;
+}
+
+export interface TravelerAuthResponse {
+  user: TravelerUser;
+  token: string;
+}
+
+export interface TravelerTripSummary {
+  trip_id: string;
+  title: string;
+  destination?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  formatted_dates?: string | null;
+  duration_days?: number | null;
+  status?: string;
+  updated_at?: string | null;
+}
+
+export interface CreatedTripResult extends Trip {
+  /** True when the trip was also persisted to the traveler's account
+   * (false when logged in but the save failed; undefined when anonymous). */
+  persistedToAccount?: boolean;
+}

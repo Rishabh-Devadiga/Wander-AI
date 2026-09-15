@@ -31,6 +31,51 @@ class UserRead(UserBase):
     id: str
     is_active: bool
     created_at: datetime
+
+
+class TravelerSignupRequest(BaseModel):
+    full_name: str = Field(min_length=1, max_length=255)
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class TravelerLoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class TravelerRead(BaseModel):
+    id: str
+    email: str
+    full_name: str
+
+
+class TravelerAuthResponse(BaseModel):
+    user: TravelerRead
+    token: str
+
+
+class TravelerTripSaveRequest(BaseModel):
+    trip_id: str = Field(min_length=1, max_length=64)
+    trip: Dict[str, Any]
+
+
+class TravelerTripSaveResponse(BaseModel):
+    trip_id: str
+    owned: bool = True
+    updated: bool = False
+
+
+class TravelerTripSummary(BaseModel):
+    trip_id: str
+    title: str
+    destination: str = ""
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    formatted_dates: Optional[str] = None
+    duration_days: Optional[int] = None
+    status: str = "planning"
+    updated_at: Optional[str] = None
     traveler_profile: Optional[TravelerProfileRead] = None
 
 # Destination Schemas

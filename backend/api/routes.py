@@ -1,6 +1,6 @@
 from typing import List, Optional, Any, Dict
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
 from sqlalchemy.orm import Session
 from backend.database.connection import get_db
 from backend.models.models import (
@@ -30,6 +30,8 @@ from backend.schemas.schemas import (
     TripApprovalRequest, TripApprovalRead, TripPipelineResponse,
     TripFinalizeRequest, TripFinalizeResponse,
     TripMessageCreate, TripMessageRead, TripMessageOverviewEntry,
+    TravelerSignupRequest, TravelerLoginRequest, TravelerRead, TravelerAuthResponse,
+    TravelerTripSaveRequest, TravelerTripSaveResponse, TravelerTripSummary,
 )
 from backend.ai.gemini_service import gemini_service
 from backend.research.service import DestinationResearchService, ResearchExecutionError
@@ -1884,3 +1886,94 @@ def lock_booking(trip_id: str, payload: Dict[str, Any] = Body(default={}), db: S
     _record_change(db, trip, "booking_locked", "booking", booking.booking_reference, "Booking choice saved.", "ai" if mode == "ai_guide" else "user")
     db.commit(); db.refresh(trip)
     return {"success": True, "booking": _booking_dict(booking), "trip": _trip_dict(trip, db)}
+
+
+# ----------------------------------------------------
+# Traveler password authentication + owned trip snapshots
+# (Operator login above is separate and untouched.)
+# ----------------------------------------------------
+def _traveler_auth_error(exc: Exception) -> HTTPException:
+    from backend.auth.service import AuthConflict, AuthError, AuthValidation, TripForbidden, TripNotFound
+    if isinstance(exc, AuthError):
+        return HTTPException(status_code=401, detail=str(exc))
+    if isinstance(exc, AuthConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, AuthValidation):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, TripForbidden):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, TripNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    raise exc
+
+
+@router.post("/auth/traveler/signup", response_model=TravelerAuthResponse, status_code=201)
+def traveler_signup(payload: TravelerSignupRequest, db: Session = Depends(get_db)):
+    """Create a traveler account (bcrypt-hashed password) and start a session."""
+    from backend.auth.service import signup_traveler
+    try:
+        return signup_traveler(db, payload.full_name, payload.email, payload.password)
+    except Exception as exc:
+        raise _traveler_auth_error(exc)
+
+
+@router.post("/auth/traveler/login", response_model=TravelerAuthResponse)
+def traveler_login(payload: TravelerLoginRequest, db: Session = Depends(get_db)):
+    """Traveler email + password login. 401 on invalid credentials."""
+    from backend.auth.service import login_traveler
+    try:
+        return login_traveler(db, payload.email, payload.password)
+    except Exception as exc:
+        raise _traveler_auth_error(exc)
+
+
+@router.get("/auth/traveler/me", response_model=TravelerRead)
+def traveler_me(request: Request, db: Session = Depends(get_db)):
+    """Validate the Bearer session and return the traveler (401 when expired/invalid)."""
+    from backend.auth.service import get_current_traveler, traveler_dict
+    try:
+        return traveler_dict(get_current_traveler(request, db))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _traveler_auth_error(exc)
+
+
+@router.get("/traveler/trips", response_model=List[TravelerTripSummary])
+def traveler_list_trips(request: Request, db: Session = Depends(get_db)):
+    """Trip summaries owned by the authenticated traveler only."""
+    from backend.auth.service import get_current_traveler, list_traveler_trips
+    try:
+        user = get_current_traveler(request, db)
+        return list_traveler_trips(db, user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _traveler_auth_error(exc)
+
+
+@router.get("/traveler/trips/{trip_id}")
+def traveler_get_trip(trip_id: str, request: Request, db: Session = Depends(get_db)):
+    """Full canonical snapshot for one owned trip. 404 unless owned."""
+    from backend.auth.service import get_current_traveler, get_traveler_trip
+    try:
+        user = get_current_traveler(request, db)
+        return get_traveler_trip(db, user, trip_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _traveler_auth_error(exc)
+
+
+@router.post("/traveler/trips", response_model=TravelerTripSaveResponse, status_code=201)
+def traveler_save_trip(payload: TravelerTripSaveRequest, request: Request, db: Session = Depends(get_db)):
+    """Create-or-update the traveler's own canonical snapshot (no duplicates;
+    403 when the trip id belongs to another traveler)."""
+    from backend.auth.service import get_current_traveler, save_traveler_trip
+    try:
+        user = get_current_traveler(request, db)
+        return save_traveler_trip(db, user, payload.trip_id, payload.trip)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _traveler_auth_error(exc)

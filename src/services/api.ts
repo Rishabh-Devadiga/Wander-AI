@@ -30,11 +30,121 @@ import {
   TripMessage,
   TripMessageCategory,
   TripMessageOverviewEntry,
+  TravelerUser,
+  TravelerAuthResponse,
+  TravelerTripSummary,
+  CreatedTripResult,
 } from '../types/tourflow';
+import { travelerSession } from './travelerSession';
 
 const API_BASE = '/api';
 
 export const TourFlowApi = {
+  /** Last HTTP status seen on a traveler auth check (lets the auth store
+   * distinguish an explicit 401 rejection from a network failure). */
+  lastAuthStatus: 0 as number,
+  /** Wired by the traveler auth store; invoked on 401s from traveler APIs. */
+  onUnauthorized: null as null | (() => void),
+
+  /** Authorization header for the logged-in traveler, if any. */
+  authHeaders(): Record<string, string> {
+    const token = travelerSession.getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  },
+
+  // Traveler password authentication (FastAPI owns sessions; only the JWT is
+  // kept client-side — never passwords).
+  async travelerSignup(fullName: string, email: string, password: string): Promise<TravelerAuthResponse> {
+    const res = await fetch(`${API_BASE}/auth/traveler/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ full_name: fullName, email, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Signup failed' }));
+      throw new Error(err.detail || 'Signup failed');
+    }
+    return await res.json();
+  },
+
+  async travelerLogin(email: string, password: string): Promise<TravelerAuthResponse> {
+    const res = await fetch(`${API_BASE}/auth/traveler/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Login failed' }));
+      throw new Error(err.detail || 'Login failed');
+    }
+    return await res.json();
+  },
+
+  async getTravelerMe(): Promise<TravelerUser> {
+    const res = await fetch(`${API_BASE}/auth/traveler/me`, {
+      headers: { ...this.authHeaders() },
+    });
+    this.lastAuthStatus = res.status;
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Session invalid' }));
+      throw new Error(err.detail || 'Session invalid');
+    }
+    return await res.json();
+  },
+
+  /** Traveler-scoped request: 401s surface session expiry exactly once. */
+  async travelerFetch<T>(path: string, init?: RequestInit): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders(), ...(init?.headers || {}) },
+    });
+    if (res.status === 401) {
+      this.lastAuthStatus = 401;
+      try {
+        this.onUnauthorized?.();
+      } catch {
+        // never break callers because of the expiry hook
+      }
+      const err = await res.json().catch(() => ({ detail: 'Session expired. Please sign in again.' }));
+      throw new Error(err.detail || 'Session expired. Please sign in again.');
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Request failed' }));
+      throw new Error(err.detail || 'Request failed');
+    }
+    return (await res.json()) as T;
+  },
+
+  // Persistent "My Trips" (PostgreSQL snapshots; canonical trip store).
+  getMyTrips(): Promise<TravelerTripSummary[]> {
+    return TourFlowApi.travelerFetch<TravelerTripSummary[]>('/traveler/trips');
+  },
+
+  getMyTrip(tripId: string): Promise<Trip> {
+    return TourFlowApi.travelerFetch<Trip>(`/traveler/trips/${encodeURIComponent(tripId)}`);
+  },
+
+  saveMyTrip(trip: Trip): Promise<{ trip_id: string; owned: boolean; updated: boolean }> {
+    return TourFlowApi.travelerFetch('/traveler/trips', {
+      method: 'POST',
+      body: JSON.stringify({ trip_id: trip.id, trip }),
+    });
+  },
+
+  /** Rehydrate the Express engine from a persisted snapshot (no regeneration). */
+  async restoreTrip(trip: Trip): Promise<Trip> {
+    const res = await fetch(`${API_BASE}/trips/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trip }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Could not open trip' }));
+      throw new Error(err.detail || 'Could not open trip');
+    }
+    return await res.json();
+  },
+
   // Health & Diagnostics
   async getHealth(): Promise<HealthStatus> {
     const res = await fetch(`${API_BASE}/health`);
@@ -112,17 +222,29 @@ export const TourFlowApi = {
     formatted_dates?: string | null;
     pace?: 'relaxed' | 'balanced' | 'packed';
     preferences?: Partial<TripPreference>;
-  }): Promise<Trip> {
+  }): Promise<CreatedTripResult> {
     const res = await fetch(`${API_BASE}/trips`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Failed to create trip' }));
       throw new Error(err.detail || 'Failed to create trip');
     }
-    return await res.json();
+    const trip: CreatedTripResult = await res.json();
+    // Authenticated travelers get the complete trip persisted to their
+    // account automatically (best-effort: creation itself already succeeded).
+    if (travelerSession.getToken()) {
+      try {
+        await this.saveMyTrip(trip);
+        trip.persistedToAccount = true;
+      } catch (err) {
+        trip.persistedToAccount = false;
+        console.warn('Trip created but could not be saved to My Trips yet:', err);
+      }
+    }
+    return trip;
   },
 
   async changeTransport(tripId: string, transportId: string): Promise<Trip> {

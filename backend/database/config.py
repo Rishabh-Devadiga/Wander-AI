@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     PLACES_TIMEOUT_S: float = 8.0
     PLACES_RADIUS_M: int = 30000
     PLACES_MAX_RESULTS: int = 12
+    # Traveler password login (JWT). Override TRAVELER_JWT_SECRET in production;
+    # the built-in default is development-only.
+    TRAVELER_JWT_SECRET: str = "dev-only-traveler-jwt-secret-change-in-production"
+    TRAVELER_JWT_EXPIRY_DAYS: int = 7
 
 settings = Settings()
 

@@ -3518,3 +3518,182 @@ def test_no_hardcoded_image_urls_in_images_service():
         source = handle.read()
     assert "unsplash.com" not in source
     assert "images_results" in source and "google_images" in source
+
+
+# ---------------------------------------------------------------------------
+# Traveler password authentication + owned trip snapshots
+# ---------------------------------------------------------------------------
+def _traveler_signup(email="traveler.auth.case@tourflow.ai", password="WanderSafe123",
+                     full_name="Auth Case Traveler"):
+    return client.post("/api/auth/traveler/signup", json={
+        "full_name": full_name, "email": email, "password": password})
+
+
+def _traveler_login(email="traveler.auth.case@tourflow.ai", password="WanderSafe123"):
+    return client.post("/api/auth/traveler/login", json={
+        "email": email, "password": password})
+
+
+def _auth_headers(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _owned_snapshot(trip_id="trp-owned-case-001"):
+    return {
+        "id": trip_id, "title": "Owned Case Trip",
+        "status": "planning", "duration_days": 4,
+        "destination": {"name": "Manali"},
+        "start_date": "2026-10-01", "end_date": "2026-10-04",
+        "formatted_dates": "Oct 1 – Oct 4, 2026",
+        "itinerary": [], "bookings": [],
+    }
+
+
+def test_traveler_signup_login_and_session():
+    created = _traveler_signup()
+    assert created.status_code == 201
+    body = created.json()
+    assert body["user"]["email"] == "traveler.auth.case@tourflow.ai"
+    assert body["user"]["full_name"] == "Auth Case Traveler"
+    assert body["token"]
+    # No password material leaks into responses
+    assert "password" not in json.dumps(body).lower()
+    user_id = body["user"]["id"]
+
+    # Duplicate email is rejected without creating a second account
+    assert _traveler_signup().status_code == 409
+
+    # Login works and identifies the same traveler
+    logged = _traveler_login()
+    assert logged.status_code == 200
+    assert logged.json()["user"]["id"] == user_id
+    assert logged.json()["token"]
+
+    # Invalid credentials are rejected
+    assert _traveler_login(password="WrongPassword999").status_code == 401
+    assert _traveler_login(email="nobody@tourflow.ai").status_code == 401
+
+    # Session validation
+    me = client.get("/api/auth/traveler/me",
+                    headers=_auth_headers(logged.json()["token"]))
+    assert me.status_code == 200
+    assert me.json()["id"] == user_id
+    assert client.get("/api/auth/traveler/me").status_code == 401
+    assert client.get("/api/auth/traveler/me",
+                      headers=_auth_headers("garbage")).status_code == 401
+
+    # Expired sessions are rejected
+    import jwt as pyjwt
+    from backend.database.config import settings
+    from datetime import datetime, timedelta, timezone
+    stale = pyjwt.encode(
+        {"sub": user_id, "role": "traveler",
+         "exp": int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp())},
+        settings.TRAVELER_JWT_SECRET, algorithm="HS256")
+    assert client.get("/api/auth/traveler/me",
+                      headers=_auth_headers(stale)).status_code == 401
+
+    # Passwords are hashed at rest, never plaintext
+    from backend.database.connection import SessionLocal
+    from backend.models.models import User
+    db = SessionLocal()
+    try:
+        row = db.query(User).filter(User.email == "traveler.auth.case@tourflow.ai").first()
+        assert row is not None
+        assert row.password_hash and row.password_hash != "WanderSafe123"
+        assert row.password_hash.startswith("$2")
+    finally:
+        db.close()
+
+
+def test_traveler_trip_ownership_isolation_and_relogin():
+    first = _traveler_signup(email="owner.one@tourflow.ai")
+    assert first.status_code == 201
+    token_one = first.json()["token"]
+    user_one = first.json()["user"]["id"]
+    second = _traveler_signup(email="owner.two@tourflow.ai")
+    token_two = second.json()["token"]
+
+    trip_id = "trp-owned-case-001"
+    saved = client.post("/api/traveler/trips",
+                        json={"trip_id": trip_id, "trip": _owned_snapshot(trip_id)},
+                        headers=_auth_headers(token_one))
+    assert saved.status_code == 201
+    assert saved.json() == {"trip_id": trip_id, "owned": True, "updated": False}
+
+    # Re-saving the same trip updates instead of duplicating
+    snapshot = _owned_snapshot(trip_id)
+    snapshot["status"] = "confirmed"
+    again = client.post("/api/traveler/trips",
+                        json={"trip_id": trip_id, "trip": snapshot},
+                        headers=_auth_headers(token_one))
+    assert again.json() == {"trip_id": trip_id, "owned": True, "updated": True}
+
+    # Owner lists and retrieves their own trip
+    mine = client.get("/api/traveler/trips", headers=_auth_headers(token_one)).json()
+    assert trip_id in [t["trip_id"] for t in mine]
+    entry = [t for t in mine if t["trip_id"] == trip_id][0]
+    assert entry["destination"] == "Manali"
+    assert entry["duration_days"] == 4
+    assert entry["status"] == "confirmed"
+    assert entry["updated_at"]
+    fetched = client.get(f"/api/traveler/trips/{trip_id}",
+                         headers=_auth_headers(token_one))
+    assert fetched.status_code == 200
+    assert fetched.json()["title"] == "Owned Case Trip"
+
+    # Trip is associated with the correct traveler in the database
+    from backend.database.connection import SessionLocal
+    from backend.models.models import Trip
+    db = SessionLocal()
+    try:
+        row = db.query(Trip).filter(Trip.id == trip_id).first()
+        assert row is not None
+        assert row.user_id == user_one
+        assert isinstance(row.canonical_snapshot, dict)
+    finally:
+        db.close()
+
+    # Another traveler cannot read it (no existence leak) or claim it
+    assert client.get(f"/api/traveler/trips/{trip_id}",
+                      headers=_auth_headers(token_two)).status_code == 404
+    assert trip_id not in [t["trip_id"] for t in client.get(
+        "/api/traveler/trips", headers=_auth_headers(token_two)).json()]
+    clash = client.post("/api/traveler/trips",
+                        json={"trip_id": trip_id, "trip": _owned_snapshot(trip_id)},
+                        headers=_auth_headers(token_two))
+    assert clash.status_code == 403
+
+    # Unauthenticated access is rejected everywhere
+    assert client.get("/api/traveler/trips").status_code == 401
+    assert client.get(f"/api/traveler/trips/{trip_id}").status_code == 401
+    assert client.post("/api/traveler/trips",
+                       json={"trip_id": trip_id,
+                             "trip": _owned_snapshot(trip_id)}).status_code == 401
+
+    # Trip remains accessible after a fresh login (new session/token)
+    relogin = _traveler_login(email="owner.one@tourflow.ai")
+    assert relogin.status_code == 200
+    refetched = client.get(f"/api/traveler/trips/{trip_id}",
+                           headers=_auth_headers(relogin.json()["token"]))
+    assert refetched.status_code == 200
+    assert refetched.json()["id"] == trip_id
+
+
+def test_operator_login_untouched_by_traveler_auth(monkeypatch):
+    # Unconfigured operator password still reports 503
+    monkeypatch.delenv("OPERATOR_LOGIN_PASSWORD", raising=False)
+    assert client.post("/api/auth/operator-login", json={
+        "email": "rahul.operator@tourflow.ai", "password": "x"}).status_code == 503
+    # Configured shared password keeps working and rejects wrong passwords
+    monkeypatch.setenv("OPERATOR_LOGIN_PASSWORD", "ops-secret")
+    assert client.post("/api/auth/operator-login", json={
+        "email": "rahul.operator@tourflow.ai",
+        "password": "ops-secret"}).status_code == 200
+    assert client.post("/api/auth/operator-login", json={
+        "email": "rahul.operator@tourflow.ai",
+        "password": "wrong"}).status_code == 401
+    # Traveler passwords are not valid operator credentials and vice versa
+    assert client.post("/api/auth/operator-login", json={
+        "email": "owner.one@tourflow.ai",
+        "password": "WanderSafe123"}).status_code == 401

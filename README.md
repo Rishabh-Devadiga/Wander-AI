@@ -737,6 +737,49 @@ npm run build
 
 ## AI Development Context / Change Log
 
+### 2026-09-15 Traveler Auth + Trip Ownership (Backend)
+
+Inspected:
+
+- No traveler auth existed (only env-shared-password operator login returning an unvalidated token). Traveler trips live in Express `tripsStore` (in-memory); FastAPI `trips` already had `user_id` ownership but no payload storage and was never written by trip creation. bcrypt 5.0.0 and PyJWT 2.14.0 already installed; `User` model reused (no duplicate concept).
+
+Changed (backend only; frontend pending):
+
+- `users.password_hash` + `trips.canonical_snapshot` (JSON) columns; migration `0008_traveler_auth_ownership`.
+- New `backend/auth/service.py`: bcrypt hashing, JWT (`TRAVELER_JWT_SECRET`, 7-day expiry), signup/login/me, traveler snapshot save (upsert, 403 on foreign trip id)/list/get (404 unless owned; owner always from verified token).
+- Routes: `POST /api/auth/traveler/signup|login`, `GET /api/auth/traveler/me`, `GET|POST /api/traveler/trips`, `GET /api/traveler/trips/{id}`. Operator login untouched.
+- Express: `POST /api/trips` stamps the FastAPI-verified `user_id` when a Bearer token is present (anonymous path unchanged, creation never fails on auth errors); new `POST /api/trips/restore` rehydrates the engine from a snapshot without regenerating.
+
+Frontend (this update):
+
+- `useTravelerAuth` zustand store + `travelerSession` module (JWT-only localStorage, boot `/me` validation, 401 → session-expired + sign-in prompt, logout clears token/state). Express proxies the six traveler endpoints (Authorization forwarded; existing ops proxy pattern).
+- `TravelerAuthModal` (login/signup tabs, validation, loading/error/session-expired states, WonderAI light-theme styling); Navbar Sign In / name + Sign Out.
+- `createTrip` sends Bearer when logged in and auto-persists the snapshot (best-effort, warn-only); anonymous creation byte-identical.
+- Workspace "My Trips" section (Trip ID, destination, dates, days, status, last updated, Open via get→restore, never regenerates) + "Save to My Trips" claim for anonymous/current trips + sign-in prompt when logged out.
+
+MAIN TourFlow flow wiring (AI chat console is the active traveler experience):
+
+- Identified MAIN components: `AIChatConsole` (chat-driven creation + itinerary display, own `generatedTrip` state), `TravelerAuthModal` (mounted once in `App`), `TravelerMyTrips` slide-over (new). Old `TravelerWorkspace` ("My Trips & Canvas") remains reachable via the Navbar workspace tab and the console's exit button; it was not removed or promoted — navigation/routing unchanged (state-driven tabs, no router).
+- `AIChatConsole` header: Sign In (gradient CTA) or name chip + Sign Out, always-visible My Trips button, Save-Trip claim button + Saved badge on generated trips; `createTrip` now returns `persistedToAccount` and both generation sites toast "saved to My Trips". Open-via-`TravelerMyTrips` restores the snapshot (packing/expenses synced, options reload via existing effect) — never regenerates.
+
+Files modified:
+
+- `backend/models/models.py`, `database/migrations/versions/0008_traveler_auth_ownership.py` (created), `backend/database/config.py`, `backend/auth/__init__.py` + `backend/auth/service.py` (created), `backend/schemas/schemas.py`, `backend/api/routes.py`, `server.ts`, `src/types/tourflow.ts`, `src/services/api.ts`, `src/services/travelerSession.ts` (created), `src/store/useTravelerAuth.ts` (created), `src/components/TravelerAuthModal.tsx` (created), `src/components/TravelerMyTrips.tsx` (created), `src/components/Navbar.tsx`, `src/App.tsx`, `src/components/TravelerWorkspace.tsx`, `src/components/AIChatConsole.tsx`, `tests/test_backend.py`, `README.md`
+
+Tests/checks performed:
+
+- 3 new tests (signup/login/session incl. expiry + hash-at-rest, ownership isolation incl. re-login + 403/404/401 matrix, operator-login untouched): passed.
+- Full suite on fresh sqlite DB: 121 passed (118 existing + 3 new), 0 failures.
+- Live E2E through both servers: signup 201, duplicate 409, login 200 (same user), me 200, authenticated create 201 with verified `user_id` stamp + 11-item itinerary, save/list/fetch 200/201, restore 200 same id, cross-user 404, no-token 401, anonymous create 201 with demo owner preserved. One wrong-password probe hit a dev-server keep-alive drop (no HTTP status); 3 immediate retries returned the correct 401 — environmental, also covered deterministically by pytest.
+- MAIN-flow E2E (chat-shaped payloads): anonymous create 201 + 11 items with demo owner; signup → JWT create (owner stamped) → save → logout (401 on list) → re-login → My Trips lists it → snapshot fetch → restore returns the identical itinerary (deep title comparison; UTF-8 codepoint check proves the one observed glyph delta was PowerShell-harness encoding, storage is lossless).
+- Required dev-Postgres repair (environmental, pre-existing drift): DB was at `0002` with `create_all`-built tables, so `upgrade head` failed on DuplicateTable; stamped `0004`, upgraded `0005` (restored missing `confirmed_at/confirmed_by` — trip confirmation was broken on dev), stamped `0007` (tables verified complete), upgraded to `0008` head. Verified columns present.
+- `npm run lint` (`tsc --noEmit`): passed. `npm run build`: passed. `git diff --check`: clean.
+
+Known remaining issues:
+
+- tsx dev Express occasionally drops a keep-alive connection under rapid scripted requests (client retries succeed); production bundle unaffected.
+- FastAPI httpx INFO logs print the SerpApi request URL including the key (pre-existing, out of scope).
+
 ### 2026-09-15 Operator Trip Communications (Internal, Trip-Centric)
 
 Inspected:

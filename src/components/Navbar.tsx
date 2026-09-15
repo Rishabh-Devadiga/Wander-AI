@@ -1,5 +1,6 @@
-import { Sparkles, MapPin, Layers, Compass, Plus, MessageSquare, Hotel, Shield } from 'lucide-react';
+import { Sparkles, MapPin, Layers, Compass, Plus, MessageSquare, Hotel, Shield, LogIn, LogOut, User } from 'lucide-react';
 import BackendStatusBadge from './BackendStatusBadge';
+import { useTravelerAuth } from '../store/useTravelerAuth';
 
 interface NavbarProps {
   activeTab: 'landing' | 'workspace' | 'destinations' | 'catalog' | 'ai_console';
@@ -9,6 +10,11 @@ interface NavbarProps {
 }
 
 export default function Navbar({ activeTab, setActiveTab, onOpenCreateTrip, onSwitchToOperator }: NavbarProps) {
+  const travelerUser = useTravelerAuth((s) => s.user);
+  const travelerStatus = useTravelerAuth((s) => s.status);
+  const openAuthModal = useTravelerAuth((s) => s.openAuthModal);
+  const logout = useTravelerAuth((s) => s.logout);
+  const isSignedIn = travelerStatus === 'authenticated' && !!travelerUser;
   return (
     <header id="main-navigation-header" className="sticky top-0 z-50 bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/70">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
@@ -125,6 +131,39 @@ export default function Navbar({ activeTab, setActiveTab, onOpenCreateTrip, onSw
           </div>
 
           <BackendStatusBadge />
+
+          {isSignedIn && travelerUser ? (
+            <div className="flex items-center gap-2">
+              <button
+                id="nav-workspace-my-trips-btn"
+                onClick={() => setActiveTab('workspace')}
+                title={travelerUser.email}
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white border border-stone-200 text-stone-700 text-xs font-bold shadow-2xs hover:border-stone-300 transition-all cursor-pointer max-w-[160px]"
+              >
+                <User className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                <span className="truncate">{travelerUser.full_name}</span>
+              </button>
+              <button
+                id="nav-sign-out-btn"
+                onClick={logout}
+                title="Sign out"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white border border-stone-200 text-stone-600 hover:text-stone-900 text-xs font-bold shadow-2xs transition-all cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Sign Out</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              id="nav-sign-in-btn"
+              onClick={() => openAuthModal('login')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white border border-stone-200 text-stone-700 hover:text-stone-900 hover:border-stone-300 text-xs font-bold shadow-2xs transition-all cursor-pointer"
+            >
+              <LogIn className="w-3.5 h-3.5 text-rose-500" />
+              <span className="hidden sm:inline">Sign In</span>
+              <span className="sm:hidden">Join</span>
+            </button>
+          )}
 
           <button
             id="open-create-trip-nav-btn"
